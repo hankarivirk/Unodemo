@@ -1,0 +1,29 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Persistent Database & Journals
+data/*.json
+data/*.bak
+data/*.tmp
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*.wal
+
+# Logs & Runtime PIDs
+logs/
+*.log
+npm-debug.log*
+pids
+*.pid
+*.seed
+
+# Dependencies & OS Artifacts
+node_modules/
+.DS_Store
+Thumbs.db

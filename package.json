@@ -1,0 +1,21 @@
+{
+  "name": "uno-royale-telegram-miniapp",
+  "version": "2.2.0",
+  "description": "Matcho! (Beta) / UNO Royale Telegram Mini App with Server-Authoritative WebSocket Multiplayer, Multi-Database Persistence (Neon/PostgreSQL, MongoDB, SQLite, Redis Cache, JSON), and Reference-Matched Mobile UI",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "ALLOW_DEV_AUTH=true NODE_ENV=development node server/index.js",
+    "test": "node tests/run_tests.js",
+    "lint": "node -c shared/uno_engine.js && node -c server/env_loader.js && node -c server/telegram_auth.js && node -c server/redis_cache.js && node -c server/db.js && node -c server/ws_server.js && node -c server/room_manager.js && node -c server/index.js && node -c bot/telegram_bot.js && node -c js/game.js && node -c tests/run_tests.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "optionalDependencies": {
+    "pg": "^8.11.3",
+    "mongodb": "^6.5.0",
+    "redis": "^4.6.13",
+    "better-sqlite3": "^9.4.3"
+  }
+}

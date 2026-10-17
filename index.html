@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Matcho!</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <!-- Subtle Toast Feedback Container -->
+  <div id="toastBannerContainer" class="fixed top-14 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-1.5 pointer-events-none w-11/12 max-w-xs"></div>
+
+  <!-- Mobile Telegram Mini App Viewport (No Fake HTML Header Bar — Preserves Genuine Telegram Native Overlay Controls!) -->
+  <div id="appViewportFrame" class="app-viewport matcho-bg select-none shadow-2xl">
+
+    <!-- 60FPS Coordinate-to-Coordinate Flying Card Layer -->
+    <div id="flyingCardLayer" class="pointer-events-none absolute inset-0 z-50 overflow-hidden"></div>
+    <!-- Dedicated Clipping-Safe Floating Card Drag Layer (z-index: 120) -->
+    <div id="dragCardLayer" class="pointer-events-none absolute inset-0 overflow-visible" style="z-index:120;"></div>
+
+    <!-- Dev-Only Floating Toolbar (Strictly Hidden in Production; Only Shown When ?dev=1 is in URL) -->
+    <div id="devOnlyToolbar" class="hidden absolute top-2 left-1/2 -translate-x-1/2 z-50 px-2.5 py-1 rounded-full bg-black/80 border border-amber-400/40 flex items-center gap-1 text-[10px] backdrop-blur-md">
+      <button id="devChatViewBtn" type="button" class="px-2 py-0.5 rounded-full bg-white/10 text-white font-bold">Chat</button>
+      <button id="devRoomViewBtn" type="button" class="px-2 py-0.5 rounded-full bg-white/10 text-white font-bold">Room</button>
+      <button id="devTableViewBtn" type="button" class="px-2 py-0.5 rounded-full bg-white/10 text-white font-bold">Table</button>
+      <button id="devSettingsBtn" type="button" class="px-2 py-0.5 rounded-full bg-purple-500/30 text-purple-200 font-bold">Settings</button>
+      <button id="devWinBtn" type="button" class="px-2 py-0.5 rounded-full bg-emerald-500/30 text-emerald-200 font-bold">Win</button>
+      <button id="devLoseBtn" type="button" class="px-2 py-0.5 rounded-full bg-rose-500/30 text-rose-200 font-bold">Lose</button>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- VIEW 0: STARTUP 2x2 PULSING GRID INTRO (Exact Video 0 Frame t=27.8s)  -->
+    <!-- ===================================================================== -->
+    <section id="view-intro" class="flex-1 flex flex-col items-center justify-center z-30">
+      <div class="intro-grid-loader">
+        <div class="intro-grid-cell"></div>
+        <div class="intro-grid-cell"></div>
+        <div class="intro-grid-cell"></div>
+        <div class="intro-grid-cell"></div>
+      </div>
+    </section>
+
+    <!-- ===================================================================== -->
+    <!-- VIEW 1: TELEGRAM GROUP CHAT ("Overseas • 3117 members, 325 online")   -->
+    <!-- ===================================================================== -->
+    <section id="view-tgchat" class="hidden flex-1 flex flex-col justify-between bg-[#0e1621] z-30 overflow-hidden">
+      <div class="bg-[#17212b] px-3 py-2 flex items-center justify-between border-b border-black/30">
+        <div class="flex items-center gap-2.5">
+          <button id="tgChatBackToRoomBtn" type="button" class="text-white text-sm px-1">←</button>
+          <div class="w-9 h-9 rounded-full bg-amber-700/60 flex items-center justify-center text-base">🐱</div>
+          <div>
+            <div class="text-xs font-extrabold text-white">Overseas 🕊️</div>
+            <div id="tgChatRoomIdSub" class="text-[10px] text-slate-400">3117 members, 325 online</div>
+          </div>
+        </div>
+        <span class="text-slate-400 text-sm px-2">⋮</span>
+      </div>
+
+      <div class="bg-[#2b5278] text-white text-[11px] font-bold py-1.5 px-3 text-center shadow">
+        VIEW VIDEO CHAT
+      </div>
+
+      <div class="flex-1 overflow-y-auto p-3 space-y-2.5 flex flex-col justify-end">
+        <div class="max-w-[88%] rounded-2xl bg-gradient-to-br from-[#6b46c1] to-[#553c9a] p-3 shadow-2xl border border-purple-300/25 space-y-2">
+          <div class="text-[11px] text-purple-200 font-semibold">via @matcho_bot</div>
+
+          <div class="h-32 rounded-xl bg-[#181122] relative overflow-hidden flex items-center justify-center border border-black/40">
+            <div class="absolute -left-3 top-3 transform rotate-12 scale-50 flex">
+              <div class="m-card m-suit-red"><div class="m-card-inner"><span class="m-card-tl-tab">4</span><div class="m-card-center">4</div></div></div>
+              <div class="m-card m-suit-green -ml-6"><div class="m-card-inner"><span class="m-card-tl-tab">8</span><div class="m-card-center">8</div></div></div>
+            </div>
+            <div class="grid grid-cols-2 gap-1.5 transform rotate-45 scale-90">
+              <div class="w-9 h-9 rounded-lg bg-emerald-500 flex items-center justify-center text-base shadow">🧟</div>
+              <div class="w-9 h-9 rounded-lg bg-blue-500 flex items-center justify-center text-base shadow">🧛</div>
+              <div class="w-9 h-9 rounded-lg bg-amber-400 flex items-center justify-center text-base shadow">🎃</div>
+              <div class="w-9 h-9 rounded-lg bg-rose-500 flex items-center justify-center text-base shadow">👻</div>
+            </div>
+          </div>
+
+          <div id="tgChatHostHeadline" class="text-xs font-bold text-white">
+            🎮 ❖ V I R K started a new game of <span class="underline">Matcho! (Beta)</span>
+          </div>
+
+          <div id="tgChatJoinedLines" class="space-y-1"></div>
+          <div id="tgChatSpecCount" class="text-[10px] text-purple-200 pt-0.5"></div>
+        </div>
+
+        <div class="max-w-[88%] grid grid-cols-2 gap-1.5">
+          <button id="tgChatJoinGameBtn" type="button" class="py-2 rounded-xl bg-[#2b3748]/95 hover:bg-[#364559] text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow">
+            <span>🕹️</span>
+            <span>Join the game</span>
+          </button>
+          <button id="tgChatSpectateBtn" type="button" class="py-2 rounded-xl bg-[#2b3748]/95 hover:bg-[#364559] text-purple-200 font-bold text-xs flex items-center justify-center gap-1.5 shadow">
+            <span>👁️</span>
+            <span>Spectate</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="bg-[#17212b] border-t border-black/40">
+        <div id="tgInlineResultPopup" class="px-3 py-2 bg-[#1c2733] border-b border-white/5 flex items-center justify-between gap-2.5 cursor-pointer hover:bg-[#233040]">
+          <div class="flex items-center gap-2.5">
+            <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-400 via-blue-500 to-rose-500 flex items-center justify-center font-black text-xs text-white shadow">
+              🃏
+            </div>
+            <div>
+              <div class="text-xs font-extrabold text-white">Matcho! (Beta)</div>
+              <div class="text-[11px] text-slate-400">Play Matcho! with up to 4 players at once!</div>
+            </div>
+          </div>
+          <span class="text-[10px] px-2 py-1 rounded bg-purple-500/20 text-purple-300 font-bold">+ Add Player</span>
+        </div>
+
+        <div class="px-3 py-2 flex items-center justify-between text-xs text-slate-300 font-mono">
+          <span>@matcho_bot <span class="text-slate-500">Select game...</span></span>
+          <button id="copyRoomInviteBtn" type="button" class="px-2 py-0.5 rounded bg-sky-500/20 text-sky-300 text-[10px] font-sans font-bold">
+            Copy Link
+          </button>
+        </div>
+        <span id="tgShareUrlDisplay" class="hidden"></span>
+
+        <button id="expandMiniAppSheetBtn" type="button" class="w-full px-4 py-2.5 bg-[#0f171e] border-t border-white/10 flex items-center justify-between text-xs font-bold text-white hover:bg-[#16212b]">
+          <span>✕ &nbsp; Matcho!</span>
+          <span>⌃</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- ===================================================================== -->
+    <!-- VIEW 2: EXACT MATCHO! "ROOM" LOBBY SCREEN (Video 0 & Video 1)         -->
+    <!-- ===================================================================== -->
+    <section id="view-room" class="hidden flex-1 flex flex-col items-center justify-center px-6 relative z-20">
+
+      <!-- Top-Left Peeking Card Backs -->
+      <div class="pointer-events-none absolute -top-12 -left-10 flex room-corner-tl opacity-95">
+        <div class="m-card-back"><div class="m-card-back-inner"></div></div>
+        <div class="m-card-back -ml-10 mt-3"><div class="m-card-back-inner"></div></div>
+      </div>
+
+      <!-- Center ROOM Content -->
+      <div class="w-full max-w-xs flex flex-col items-center space-y-3 z-10">
+        <svg class="w-8 h-8 text-white" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zm-6.5 1a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zm13 0a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zm-6.5 1.5c-2.8 0-8 1.4-8 4.2V20h16v-2.3c0-2.8-5.2-4.2-8-4.2zm-6.5 1c-.6 0-3.5.4-3.5 2.2V19h3v-1.3c0-1.1.6-2.1 1.6-2.8-.4-.1-.8-.4-1.1-.4zm13 0c-.3 0-.7.3-1.1.4 1 .7 1.6 1.7 1.6 2.8V19h3v-2.3c0-1.8-2.9-2.2-3.5-2.2z"/>
+        </svg>
+        <h1 class="text-2xl font-black tracking-wider uppercase text-white">ROOM</h1>
+
+        <!-- Dark Plum Room Box -->
+        <div class="w-full rounded-3xl bg-[#241a34]/90 border border-white/[0.04] p-4 space-y-2.5 shadow-2xl backdrop-blur-md">
+          <div class="flex items-center justify-between pb-1.5">
+            <div class="flex items-center gap-2.5">
+              <button id="roomAddAiBotBtn" type="button" class="w-7 h-7 rounded-full bg-white/[0.08] hover:bg-white/[0.15] flex items-center justify-center text-white" title="Waiting for players">
+                <svg class="w-3.5 h-3.5 spin-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/>
+                </svg>
+              </button>
+              <span id="roomStatusSubtitle" class="text-xs font-medium text-purple-200/65">Waiting for players...</span>
+            </div>
+            <span id="roomPlayerCountText" class="text-xs font-semibold text-white/80">2 / 4</span>
+          </div>
+
+          <div id="roomPlayersList" class="space-y-2 max-h-44 overflow-y-auto"></div>
+          <div id="roomSpectatorsBar" class="hidden"></div>
+          <button id="roomShareInviteBtn" type="button" class="hidden"></button>
+        </div>
+
+        <div id="roomCenterActionWrap" class="pt-3 flex flex-col items-center"></div>
+      </div>
+
+      <!-- Bottom-Right Peeking 4 Action Cards -->
+      <div class="pointer-events-none absolute -bottom-10 -right-4 flex items-end room-corner-br">
+        <div class="m-card m-suit-red transform -rotate-12">
+          <div class="m-card-inner"><span class="m-card-tl-tab">⇄</span><div class="m-card-center">⇄</div></div>
+        </div>
+        <div class="m-card m-suit-green -ml-8 transform -rotate-3">
+          <div class="m-card-inner"><span class="m-card-tl-tab">⊘</span><div class="m-card-center">⊘</div></div>
+        </div>
+        <div class="m-card m-suit-blue -ml-8 transform rotate-6">
+          <div class="m-card-inner"><span class="m-card-tl-tab">+2</span><div class="m-card-center">+2</div></div>
+        </div>
+        <div class="m-card m-suit-wild -ml-8 transform rotate-12">
+          <div class="m-card-inner"><span class="m-card-tl-tab">?</span><div class="m-card-center"><div class="w-8 h-8 grid grid-cols-2 gap-1 transform rotate-45" style="grid-template-columns:repeat(2,minmax(0,1fr));"><div class="rounded-[3px] bg-[#f43f3f]"></div><div class="rounded-[3px] bg-[#f7be16]"></div><div class="rounded-[3px] bg-[#54dc18]"></div><div class="rounded-[3px] bg-[#1877f2]"></div></div></div></div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ===================================================================== -->
+    <!-- VIEW 3: EXACT MATCHO! GAMEPLAY TABLE                                  -->
+    <!-- ===================================================================== -->
+    <section id="view-game" class="hidden flex-1 flex flex-col justify-between relative z-20 overflow-hidden">
+
+      <!-- Confetti & Streamer Layer on Win/Loss -->
+      <div id="tableConfettiLayer" class="pointer-events-none absolute inset-0 z-30 overflow-hidden"></div>
+
+      <!-- Spectator Mode Lock Banner -->
+      <div id="gameSpectatorBanner" class="hidden mx-4 mt-2 px-3 py-1 rounded-full bg-purple-950/90 border border-purple-400/40 flex items-center justify-between text-[11px] text-purple-200 z-30">
+        <span>👁️ Spectator Mode</span>
+        <span id="spectatorCountLabel" class="font-bold text-purple-300 text-[10px]">Watching</span>
+      </div>
+
+      <!-- Top Opponent Zone: Bleeds directly from top: 0 of viewport (Exact Screenshot 10-23-48 Match!) -->
+      <div id="topOpponentZone" class="flex flex-col items-center justify-start pt-0 z-20 min-h-[148px]"></div>
+
+      <!-- Middle Arena: Left Seat + Center Piles & Curved Orange Arrows + Right Seat -->
+      <div class="relative flex-1 flex items-center justify-center px-2">
+        <div id="leftOpponentZone" class="absolute left-1.5 top-1/2 -translate-y-1/2 z-20"></div>
+
+        <!-- Center Discard + Draw Deck + Top/Bottom Curved Crescent-Arc Orange Arrows -->
+        <div class="flex flex-col items-center justify-center gap-3.5">
+
+          <!-- Top Curved Orange Arrow (Exact Crescent Arc from Screenshot 10-23-48!) -->
+          <div id="topDirectionArrow" class="w-44 h-9 flex items-center justify-center dir-arrow-svg">
+            <svg viewBox="0 0 200 46" class="w-full h-full overflow-visible">
+              <defs>
+                <linearGradient id="arrowGradTop" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stop-color="#f5923e" stop-opacity="0" />
+                  <stop offset="35%" stop-color="#f5923e" stop-opacity="0.35" />
+                  <stop offset="80%" stop-color="#f5923e" stop-opacity="0.88" />
+                  <stop offset="100%" stop-color="#ff9f43" stop-opacity="1" />
+                </linearGradient>
+              </defs>
+              <path d="M 18 35 Q 100 3 166 28" fill="none" stroke="url(#arrowGradTop)" stroke-width="10.5" stroke-linecap="round" />
+              <path d="M 161 15 L 180 32 L 154 36 Z" fill="#ff9f43" stroke="#ff9f43" stroke-width="2" stroke-linejoin="round" />
+            </svg>
+          </div>
+
+          <!-- Center Two Piles: Left = Discard Stack, Right = 3D Ghost Draw Deck on Purple Tray -->
+          <div class="flex items-center justify-center gap-5 my-0.5">
+            <div id="centerDiscardStack" class="relative w-[106px] h-[156px] mt-4 flex items-center justify-center"></div>
+
+            <div id="drawDeckTray" class="draw-deck-tray">
+              <div id="centerDrawDeck" class="m-card-back" role="button" tabindex="0" aria-label="Draw Card">
+                <div class="m-card-back-inner"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bottom Curved Orange Arrow (Exact Crescent Arc from Screenshot 10-23-48!) -->
+          <div id="bottomDirectionArrow" class="w-44 h-9 flex items-center justify-center dir-arrow-svg">
+            <svg viewBox="0 0 200 46" class="w-full h-full overflow-visible">
+              <defs>
+                <linearGradient id="arrowGradBot" x1="100%" y1="0%" x2="0%" y2="0%">
+                  <stop offset="0%" stop-color="#f5923e" stop-opacity="0" />
+                  <stop offset="35%" stop-color="#f5923e" stop-opacity="0.35" />
+                  <stop offset="80%" stop-color="#f5923e" stop-opacity="0.88" />
+                  <stop offset="100%" stop-color="#ff9f43" stop-opacity="1" />
+                </linearGradient>
+              </defs>
+              <path d="M 182 11 Q 100 43 34 18" fill="none" stroke="url(#arrowGradBot)" stroke-width="10.5" stroke-linecap="round" />
+              <path d="M 39 31 L 20 14 L 46 10 Z" fill="#ff9f43" stroke="#ff9f43" stroke-width="2" stroke-linejoin="round" />
+            </svg>
+          </div>
+
+          <!-- Contextual Action Pills (Hidden during normal play) -->
+          <div class="flex items-center justify-center gap-2 min-h-[18px] z-30">
+            <button id="callUnoActionBtn" type="button" class="hidden px-3 py-0.5 rounded-full bg-amber-400 text-slate-950 font-black text-[11px] shadow-lg">
+              UNO!
+            </button>
+            <button id="catchUnoActionBtn" type="button" class="hidden px-3 py-0.5 rounded-full bg-rose-600 text-white font-black text-[11px] shadow-lg animate-pulse">
+              CATCH (+2)
+            </button>
+            <button id="passTurnActionBtn" type="button" class="hidden px-3 py-0.5 rounded-full bg-white/15 hover:bg-white/25 text-white font-bold text-[11px] shadow">
+              Pass Turn
+            </button>
+          </div>
+
+        </div>
+
+        <div id="rightOpponentZone" class="absolute right-1.5 top-1/2 -translate-y-1/2 z-20"></div>
+      </div>
+
+      <!-- Bottom Player Area -->
+      <div class="pb-3.5 pt-0.5 relative">
+        <!-- Multi-Row Hand Container -->
+        <div id="bottomHandStrip" class="hand-rows-container z-30"></div>
+
+        <!-- Bottom Bar: Center Avatar + 'You' + Card Count, Right White Happy Face Pill Button -->
+        <div class="px-4 pt-1.5 flex items-center justify-between relative">
+          <div class="w-14"></div>
+
+          <div id="bottomPlayerStatus" class="flex items-center gap-2.5"></div>
+
+          <!-- Exact Screenshot 10-23-48 Emoji Trigger Button -->
+          <button id="openEmojiPopupBtn" type="button" class="relative z-50 w-14 h-10 rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.06] flex items-center justify-center shadow" aria-label="Emoji Reactions">
+            <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="12" cy="12" r="10" />
+              <circle cx="8.5" cy="10" r="1.4" fill="#1b1128" />
+              <circle cx="15.5" cy="10" r="1.4" fill="#1b1128" />
+              <path d="M8.5 14.5c1 1.8 2.2 2.5 3.5 2.5s2.5-.7 3.5-2.5" fill="none" stroke="#1b1128" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- 4x4 iPhone/Apple-Style Emoji Reaction Popup Grid -->
+        <div id="emojiPopupCard" class="hidden absolute bottom-14 right-4 z-50 w-60 rounded-3xl bg-[#1b1429]/95 border border-white/15 p-3.5 shadow-2xl backdrop-blur-md">
+          <div id="appleEmojiGrid" class="grid grid-cols-4 gap-2.5 place-items-center" style="grid-template-columns: repeat(4, minmax(0, 1fr));"></div>
+          <button id="closeEmojiPopupBtn" type="button" class="mt-2.5 w-full py-1 flex items-center justify-center text-white/60 hover:text-white">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- OVERLAY 1: GIANT ROTATED 4-COLOR DIAMOND WILD PICKER -->
+      <div id="wildDiamondModal" class="hidden absolute inset-0 z-50 bg-black/45 backdrop-blur-[2px] flex items-center justify-center">
+        <div id="wildDiamondGrid" class="wild-diamond-picker grid grid-cols-2 gap-3" style="grid-template-columns: repeat(2, minmax(0, 1fr));"></div>
+      </div>
+
+      <!-- OVERLAY 2: WILD DRAW FOUR (+4) CHALLENGE OR ACCEPT PROMPT -->
+      <div id="wild4ChallengeModal" class="hidden absolute inset-0 z-50 bg-black/65 backdrop-blur-sm flex items-center justify-center px-6">
+        <div class="w-full max-w-xs rounded-3xl bg-[#241a35] border border-purple-400/40 p-5 text-center space-y-3 shadow-2xl">
+          <div class="text-2xl font-black text-rose-400">+4 WILD PLAYED!</div>
+          <p id="wild4ChallengeDesc" class="text-xs text-purple-200 leading-relaxed">
+            An opponent played Wild Draw Four (+4). Accept +4 cards or challenge if they had a matching color card?
+          </p>
+          <div class="grid grid-cols-2 gap-2.5 pt-1" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+            <button id="acceptWild4Btn" type="button" class="py-2.5 rounded-2xl bg-white/10 hover:bg-white/15 text-white font-bold text-xs">
+              Accept +4
+            </button>
+            <button id="challengeWild4Btn" type="button" class="py-2.5 rounded-2xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs shadow-lg">
+              Challenge +4
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- =================================================================== -->
+      <!-- OVERLAY 3: EXACT "YOU WON" / "YOU LOST" + INVITE FRIENDS & REMATCH  -->
+      <!-- (Exact Screenshot 10-24-59 & 10-25-01 Match!)                       -->
+      <!-- =================================================================== -->
+      <div id="matchoEndOverlay" class="hidden absolute inset-0 z-40 bg-[#100a19]/82 flex flex-col items-center justify-center px-6">
+        <div class="w-full max-w-xs flex flex-col items-center space-y-3">
+          <div id="endCrownIcon" class="hidden text-amber-400 drop-shadow-[0_0_12px_rgba(251,191,36,0.85)]">
+            <svg class="w-9 h-9" viewBox="0 0 24 24" fill="currentColor"><path d="M3 18h18v2H3v-2zm0-2l2-9 4.5 4L12 5l2.5 6L19 7l2 9H3z"/></svg>
+          </div>
+          <h2 id="endTitleText" class="text-3xl font-black tracking-wider uppercase text-white mb-1">YOU LOST</h2>
+
+          <!-- Standings Pills -->
+          <div id="endStandingsRows" class="w-full space-y-2.5 pt-1"></div>
+
+          <!-- Two Side-by-Side Pill Buttons: INVITE FRIENDS (Purple) & REMATCH (Orange) -->
+          <div id="endRematchBtnWrap" class="pt-5 flex items-start justify-center gap-6"></div>
+
+          <div id="hostForceRematchWrap" class="hidden w-full pt-2">
+            <button id="hostForceStartRematchBtn" type="button" class="w-full py-2 rounded-full bg-white/10 hover:bg-white/15 text-amber-300 font-bold text-[11px] transition-all">
+              ⚡ Force Start Rematch
+            </button>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ===================================================================== -->
+    <!-- OVERLAY 4: EXACT MATCHO! "SETTINGS" SCREEN (Screenshot 10-24-11 Match)-->
+    <!-- Triggered via Telegram.WebApp.SettingsButton inside native ⋮ menu!    -->
+    <!-- ===================================================================== -->
+    <div id="settingsModalOverlay" class="hidden absolute inset-0 z-50 bg-[#110b19]/92 backdrop-blur-xl flex flex-col justify-between p-6">
+      <div class="h-8"></div>
+
+      <!-- Center Gear + SETTINGS + 3 Pure Toggle Rows (Zero Extra Clutter Buttons!) -->
+      <div class="w-full max-w-xs mx-auto flex flex-col items-center space-y-4">
+        <svg class="w-12 h-12 text-white mb-1" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/>
+        </svg>
+        <h2 class="text-3xl font-black tracking-wider uppercase text-white pb-2">SETTINGS</h2>
+
+        <div class="w-full rounded-3xl bg-[#161020]/95 border border-white/[0.04] px-6 py-7 space-y-6 shadow-2xl">
+          <!-- Row 1: SOUNDS -->
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3.5">
+              <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+              </svg>
+              <span class="text-xs font-extrabold tracking-wider uppercase text-white">SOUNDS</span>
+            </div>
+            <button id="soundToggleTopBtn" type="button" class="settings-switch switch-on" aria-label="Toggle Sounds">
+              <span class="settings-switch-thumb"></span>
+            </button>
+          </div>
+
+          <!-- Row 2: COLORBLIND MODE -->
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3.5">
+              <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/><path d="M12 2v2M5 4l1.5 1.5M19 4l-1.5 1.5"/>
+              </svg>
+              <span class="text-xs font-extrabold tracking-wider uppercase text-white">COLORBLIND MODE</span>
+            </div>
+            <button id="toggleColorblindBtn" type="button" class="settings-switch switch-off" aria-label="Toggle Colorblind Mode">
+              <span class="settings-switch-thumb"></span>
+            </button>
+          </div>
+
+          <!-- Row 3: LOWER QUALITY -->
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3.5">
+              <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+              </svg>
+              <span class="text-xs font-extrabold tracking-wider uppercase text-white">LOWER QUALITY</span>
+            </div>
+            <button id="toggleLowQualityBtn" type="button" class="settings-switch switch-off" aria-label="Toggle Lower Quality">
+              <span class="settings-switch-thumb"></span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Outlined `✕ CLOSE` Pill (Exact Screenshot 10-24-11 & Video 0 t=45.0s Match!) -->
+      <div class="flex flex-col items-center pb-2">
+        <button id="closeSettingsModalBtn" type="button" class="settings-close-pill" aria-label="Close Settings">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+        <span class="text-[10px] font-extrabold tracking-widest uppercase text-slate-400 mt-1.5">CLOSE</span>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- OVERLAY 5: EXACT MATCHO! "WHOOPS... LOST CONNECTION" RECONNECT SCREEN -->
+    <!-- ===================================================================== -->
+    <div id="reconnectOverlay" class="hidden absolute inset-0 z-50 bg-[#0d0814]/88 backdrop-blur-sm flex flex-col items-center justify-center px-6 text-center">
+      <div class="text-4xl text-white/90 mb-2">🔌</div>
+      <h2 class="text-xl font-black tracking-wider uppercase text-white">WHOOPS...</h2>
+      <p id="reconnectMessageText" class="text-xs text-purple-200/80 max-w-xs mt-1 leading-relaxed">
+        You lost connection, trying to reconnect you back...
+      </p>
+      <div class="mt-4 flex gap-2">
+        <button id="retryConnectNowBtn" type="button" class="px-4 py-2 rounded-full bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-lg">
+          Reconnect Now
+        </button>
+        <button id="switchOfflinePracticeBtn" type="button" class="px-4 py-2 rounded-full bg-white/10 hover:bg-white/15 text-purple-200 font-bold text-xs">
+          Continue Match
+        </button>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- OVERLAY 6: TELEGRAM MINI APP LAUNCH & AUTH RECOVERY SCREEN            -->
+    <!-- ===================================================================== -->
+    <div id="authRecoveryOverlay" class="hidden absolute inset-0 z-50 bg-[#0d0814]/92 backdrop-blur-md flex flex-col items-center justify-center px-6 text-center">
+      <div class="w-full max-w-xs rounded-3xl bg-[#241a34]/95 border border-white/[0.08] p-6 space-y-4 shadow-2xl">
+        <div class="w-12 h-12 mx-auto rounded-full bg-purple-500/20 border border-purple-400/40 flex items-center justify-center text-2xl">✈️</div>
+        <h2 id="authRecoveryTitle" class="text-lg font-black tracking-wider uppercase text-white">TELEGRAM LAUNCH REQUIRED</h2>
+        <p id="authRecoveryMessage" class="text-xs text-purple-200/85 leading-relaxed">
+          Launch Matcho! from the Telegram bot button for live online multiplayer, or start an instant Practice Match against Utya right now.
+        </p>
+        <div class="flex flex-col gap-2.5 pt-1">
+          <button id="authRetryTelegramBtn" type="button" class="w-full py-2.5 rounded-full bg-[#7c4dff] hover:bg-[#6e3ff3] text-white font-bold text-xs shadow-lg transition-all">
+            🔄 Retry Telegram Connection
+          </button>
+          <a id="authOpenTelegramBotLink" href="https://t.me/matcho_bot" target="_blank" rel="noopener noreferrer" class="w-full py-2.5 rounded-full bg-sky-500/20 hover:bg-sky-500/30 border border-sky-400/40 text-sky-200 font-bold text-xs transition-all block" style="text-decoration:none;">
+            ✈️ Open in Telegram Bot
+          </a>
+          <button id="authPlayPracticeBtn" type="button" class="w-full py-2.5 rounded-full bg-white/10 hover:bg-white/15 text-purple-200 font-bold text-xs transition-all">
+            🎮 Play Practice Match (vs Utya)
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="shared/uno_engine.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>
