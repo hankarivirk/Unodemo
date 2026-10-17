@@ -358,14 +358,54 @@
    * 3. URL query `?tgWebAppData=...` or `?initData=...`
    * 4. `sessionStorage.getItem('matcho_tg_init_data')` (persisted across in-app page reloads)
    */
+  const OUTER_WRAPPER_KEYS = new Set([
+    'tgWebAppVersion',
+    'tgWebAppPlatform',
+    'tgWebAppThemeParams',
+    'tgWebAppDefaultColors',
+    'tgWebAppBotInline',
+    'tgWebAppShowSettings',
+    'tgWebAppStartParam'
+  ]);
+
+  function extractRawTgWebAppDataFromPart(rawPart) {
+    if (!rawPart || typeof rawPart !== 'string') return '';
+    const trimmed = rawPart.trim().replace(/^[#?]+/, '');
+    if (!trimmed) return '';
+    if (trimmed.startsWith('tgWebAppData=') || trimmed.includes('&tgWebAppData=')) {
+      try {
+        const p = new URLSearchParams(trimmed);
+        const val = p.get('tgWebAppData');
+        if (val && (val.includes('hash=') || /hash%3D/i.test(val))) {
+          return val.trim();
+        }
+      } catch (e) {}
+      if (trimmed.startsWith('tgWebAppData=')) {
+        const withoutPrefix = trimmed.slice('tgWebAppData='.length);
+        const kept = withoutPrefix.split('&').filter(seg => {
+          const eq = seg.indexOf('=');
+          const k = eq === -1 ? seg : seg.slice(0, eq);
+          return !OUTER_WRAPPER_KEYS.has(k);
+        });
+        return kept.join('&').trim();
+      }
+    }
+    try {
+      const p = new URLSearchParams(trimmed);
+      const initVal = p.get('initData');
+      if (initVal && initVal.trim()) return initVal.trim();
+    } catch (e) {}
+    return '';
+  }
+
   function resolveTelegramInitData() {
     const tg = getTelegramWebApp();
     let raw = (tg && typeof tg.initData === 'string' && tg.initData.trim()) ? tg.initData.trim() : '';
 
     if (!raw) {
-      const fromHash = hashParams.get('tgWebAppData') || '';
-      const fromQuery = urlParams.get('tgWebAppData') || urlParams.get('initData') || '';
-      raw = (fromHash || fromQuery).trim();
+      const currentHash = (window.location && window.location.hash) || '';
+      const currentSearch = (window.location && window.location.search) || '';
+      raw = extractRawTgWebAppDataFromPart(currentHash) || extractRawTgWebAppDataFromPart(currentSearch);
     }
 
     if (raw) {
@@ -384,7 +424,9 @@
   }
 
   function resolveLaunchToken() {
-    const fromUrl = (urlParams.get('launch_token') || hashParams.get('launch_token') || '').trim();
+    const currentSearch = new URLSearchParams((window.location && window.location.search) || '');
+    const currentHash = new URLSearchParams(((window.location && window.location.hash) || '').replace(/^#/, ''));
+    const fromUrl = (currentSearch.get('launch_token') || currentHash.get('launch_token') || '').trim();
     if (fromUrl) {
       try { window.sessionStorage.setItem('matcho_launch_token', fromUrl); } catch (e) {}
       return fromUrl;
@@ -396,24 +438,57 @@
     }
   }
 
+  function getVerifiedTelegramUserIdFromEnv() {
+    const tg = getTelegramWebApp();
+    if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id) {
+      return String(tg.initDataUnsafe.user.id);
+    }
+    const idParams = parseInitDataParams();
+    if (idParams && idParams.get('user')) {
+      try {
+        const u = JSON.parse(idParams.get('user'));
+        if (u && u.id) return String(u.id);
+      } catch (e) {}
+    }
+    return null;
+  }
+
   function loadSavedSessionToken() {
     try {
-      return (
+      const savedToken = (
         window.sessionStorage.getItem('matcho_session_token_v4') ||
         window.localStorage.getItem('matcho_session_token_v4') ||
         ''
       ).trim();
+      if (!savedToken) return '';
+      const savedUid = (
+        window.sessionStorage.getItem('matcho_session_uid_v4') ||
+        window.localStorage.getItem('matcho_session_uid_v4') ||
+        ''
+      ).trim();
+      const liveTgUid = getVerifiedTelegramUserIdFromEnv();
+      if (liveTgUid && savedUid && liveTgUid !== savedUid) {
+        // Telegram account changed on this device -> purge stale session token immediately
+        clearSessionToken();
+        return '';
+      }
+      return savedToken;
     } catch (e) {
       return '';
     }
   }
 
-  function saveSessionToken(token) {
+  function saveSessionToken(token, userId) {
     if (!token) return;
     client.sessionToken = token;
+    const uid = String(userId || (myUser && myUser.id) || '');
     try {
       window.sessionStorage.setItem('matcho_session_token_v4', token);
       window.localStorage.setItem('matcho_session_token_v4', token);
+      if (uid) {
+        window.sessionStorage.setItem('matcho_session_uid_v4', uid);
+        window.localStorage.setItem('matcho_session_uid_v4', uid);
+      }
     } catch (e) {}
   }
 
@@ -422,6 +497,8 @@
     try {
       window.sessionStorage.removeItem('matcho_session_token_v4');
       window.localStorage.removeItem('matcho_session_token_v4');
+      window.sessionStorage.removeItem('matcho_session_uid_v4');
+      window.localStorage.removeItem('matcho_session_uid_v4');
     } catch (e) {}
   }
 
@@ -778,30 +855,39 @@
     const dRect = discardEl.getBoundingClientRect();
     if (!dRect || dRect.width <= 0 || dRect.height <= 0) return false;
 
-    const tolX = 14;
-    const tolY = 14;
-    const minX = dRect.left - tolX;
-    const maxX = dRect.right + tolX;
-    const minY = dRect.top - tolY;
-    const maxY = dRect.bottom + tolY;
+    const padX = 20;
+    const padY = 20;
+    const minX = dRect.left - padX;
+    const maxX = dRect.right + padX;
+    const minY = dRect.top - padY;
+    const maxY = dRect.bottom + padY;
 
-    if (typeof clientX === 'number' && typeof clientY === 'number') {
+    const hasPointer = (typeof clientX === 'number' && typeof clientY === 'number' && !Number.isNaN(clientX) && !Number.isNaN(clientY));
+
+    // Primary check: finger/pointer release point is directly over #centerDiscardStack (within 20px touch halo)
+    if (hasPointer) {
       if (clientX >= minX && clientX <= maxX && clientY >= minY && clientY <= maxY) {
         return true;
       }
     }
 
+    // Secondary check: card center is inside #centerDiscardStack AND pointer release point is within 44px of #centerDiscardStack
+    // (Prevents false drops when a card edge visually overlaps the discard pile while the finger is still down near the hand!)
     if (draggedRect && draggedRect.width > 0 && draggedRect.height > 0) {
       const cx = draggedRect.left + draggedRect.width / 2;
       const cy = draggedRect.top + draggedRect.height / 2;
-      if (cx >= minX && cx <= maxX && cy >= minY && cy <= maxY) {
-        return true;
-      }
-      const overlapW = Math.max(0, Math.min(draggedRect.right, dRect.right) - Math.max(draggedRect.left, dRect.left));
-      const overlapH = Math.max(0, Math.min(draggedRect.bottom, dRect.bottom) - Math.max(draggedRect.top, dRect.top));
-      const overlapArea = overlapW * overlapH;
-      if (overlapArea >= dRect.width * dRect.height * 0.25) {
-        return true;
+      const centerInside = (cx >= dRect.left - 8 && cx <= dRect.right + 8 && cy >= dRect.top - 8 && cy <= dRect.bottom + 8);
+      if (centerInside) {
+        if (!hasPointer) return true;
+        const nearMax = 44;
+        if (
+          clientX >= dRect.left - nearMax &&
+          clientX <= dRect.right + nearMax &&
+          clientY >= dRect.top - nearMax &&
+          clientY <= dRect.bottom + nearMax
+        ) {
+          return true;
+        }
       }
     }
 
@@ -1127,6 +1213,18 @@
         return;
       }
 
+      if (msg.code === 'ROOM_EXPIRED') {
+        if (msg.room) {
+          client.room = msg.room;
+        } else if (client.room) {
+          client.room.status = 'expired';
+        }
+        showToast(msg.error || 'This lobby has expired.', 'error');
+        showView('room');
+        renderRoomLobby();
+        return;
+      }
+
       showToast(msg.error || 'Move not allowed.', 'error');
       if (msg.canSpectate && msg.roomId && client.ws && client.ws.readyState === 1) {
         client.ws.send(JSON.stringify(Object.assign({}, buildCurrentAuthPayload(), {
@@ -1140,7 +1238,9 @@
 
     if (msg.type === 'ROOM_JOINED') {
       hideAuthRecoveryModal();
-      if (msg.sessionToken) saveSessionToken(msg.sessionToken);
+      if (msg.sessionToken) saveSessionToken(msg.sessionToken, myUser && myUser.id);
+      if (msg.room && msg.room.botUsername) client.botUsername = msg.room.botUsername;
+      if (msg.room && msg.room.appShortName) client.appShortName = msg.room.appShortName;
       client.roomId = msg.room.id;
       client.room = msg.room;
 
@@ -1518,12 +1618,31 @@
   }
 
   // --- Render ROOM Lobby ---
-  function renderRoomLobby() {
+  const renderRoomLobby = window.__renderRoomLobby = function() {
     const room = client.room;
     if (!room) return;
 
+    const maxPlayers = room.maxPlayers || 4;
     const countEl = document.getElementById('roomPlayerCountText');
-    if (countEl) countEl.textContent = `${room.players.length} / 4`;
+    if (countEl) countEl.textContent = `${room.players.length} / ${maxPlayers}`;
+
+    const isHost = String(room.hostId) === String(myUser.id) || client.mode === 'offline';
+    const subEl = document.getElementById('roomStatusSubtitle');
+    if (subEl) {
+      if (room.status === 'expired') {
+        subEl.textContent = '⏳ Game Expired — Lobby timed out';
+      } else if (client.mode === 'offline') {
+        subEl.textContent = 'Local / Offline Practice (vs Local AI)';
+      } else if (room.roomMode === 'solo_utya') {
+        subEl.textContent = 'Server-Backed Solo Practice (vs Utya)';
+      } else if (room.players.length < 2) {
+        subEl.textContent = 'Waiting for players...';
+      } else if (isHost) {
+        subEl.textContent = room.players.length >= maxPlayers ? 'Room full — Ready to start!' : 'Ready to start!';
+      } else {
+        subEl.textContent = 'Waiting for host to start...';
+      }
+    }
 
     const listEl = document.getElementById('roomPlayersList');
     if (listEl) {
@@ -1550,40 +1669,80 @@
       }).join('');
     }
 
-    const isHost = String(room.hostId) === String(myUser.id) || client.mode === 'offline';
     const actionWrap = document.getElementById('roomCenterActionWrap');
     if (actionWrap) {
-      if (room.players.length < 2) {
+      if (room.status === 'expired') {
         actionWrap.innerHTML = `
-          <button id="roomWaitOrStartBtn" type="button" class="w-20 h-10 rounded-full bg-[#5b3a39] hover:bg-[#6e4645] flex items-center justify-center shadow-lg transition-all">
+          <button id="roomPlayAgainBtn" type="button" class="px-5 h-10 rounded-full bg-[#7c4dff] hover:bg-[#6e3ff3] flex items-center justify-center gap-2 text-xs font-extrabold text-white shadow-lg transition-transform active:scale-95">
+            <span>🔄</span>
+            <span>Play Again</span>
+          </button>
+          <span id="roomActionStatusLabel" class="text-[10px] font-extrabold tracking-widest uppercase text-amber-300 mt-1.5">⏳ GAME EXPIRED</span>
+        `;
+        const againBtn = document.getElementById('roomPlayAgainBtn');
+        if (againBtn) {
+          againBtn.addEventListener('click', () => {
+            const tgApp = getTelegramWebApp();
+            if (tgApp && typeof tgApp.switchInlineQuery === 'function') {
+              try {
+                tgApp.switchInlineQuery('play', ['users', 'groups', 'supergroups']);
+                return;
+              } catch (e) {}
+            }
+            if (client.mode === 'online' && client.ws && client.ws.readyState === 1) {
+              client.ws.send(JSON.stringify(Object.assign({}, buildCurrentAuthPayload(), {
+                type: 'CREATE_ROOM'
+              })));
+            } else {
+              startOfflinePracticeMode(false);
+            }
+          });
+        }
+      } else if (room.players.length < 2) {
+        // Incomplete room: show non-interactive WAITING indicator (never adds an AI bot on click!)
+        actionWrap.innerHTML = `
+          <div id="roomWaitOrStartBtn" role="status" aria-disabled="true" class="w-20 h-10 rounded-full bg-[#5b3a39] flex items-center justify-center shadow-lg opacity-95">
             <svg class="w-4 h-4 text-white/90 spin-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/>
             </svg>
+          </div>
+          <span id="roomActionStatusLabel" class="text-[10px] font-extrabold tracking-widest uppercase text-slate-300 mt-1.5">WAITING</span>
+          <button id="roomCopyInvitePillBtn" type="button" class="mt-3 px-3.5 py-1.5 rounded-full bg-white/[0.08] hover:bg-white/[0.14] text-[11px] font-bold text-purple-200 flex items-center gap-1.5 transition-all">
+            <span>🔗</span>
+            <span>Invite Friends</span>
           </button>
-          <span class="text-[10px] font-extrabold tracking-widest uppercase text-slate-300 mt-1.5">WAITING</span>
         `;
-        const wBtn = document.getElementById('roomWaitOrStartBtn');
-        if (wBtn) {
-          wBtn.addEventListener('click', () => {
-            sendServerCommand({ type: 'ADD_BOT' });
-          });
+        const invPill = document.getElementById('roomCopyInvitePillBtn');
+        if (invPill) {
+          invPill.addEventListener('click', () => shareOrCopyRoomLink());
         }
-      } else {
+      } else if (isHost) {
+        // Required player count reached & viewer is Host: show clickable purple START button!
         actionWrap.innerHTML = `
           <button id="roomWaitOrStartBtn" type="button" class="w-20 h-10 rounded-full bg-[#7c4dff] hover:bg-[#6e3ff3] flex items-center justify-center shadow-[0_0_24px_rgba(124,77,255,0.65)] transition-transform active:scale-95">
             <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
           </button>
-          <span class="text-[10px] font-extrabold tracking-widest uppercase text-slate-300 mt-1.5">START</span>
+          <span id="roomActionStatusLabel" class="text-[10px] font-extrabold tracking-widest uppercase text-slate-300 mt-1.5">START</span>
         `;
         const startBtn = document.getElementById('roomWaitOrStartBtn');
         if (startBtn) {
           startBtn.addEventListener('click', () => {
-            if (isHost) sendServerCommand({ type: 'START_GAME' });
+            sendServerCommand({ type: 'START_GAME' });
           });
         }
+      } else {
+        // Viewer is a non-host player or spectator: show clear non-clickable WAITING FOR HOST state
+        actionWrap.innerHTML = `
+          <div id="roomWaitOrStartBtn" role="status" aria-disabled="true" class="w-20 h-10 rounded-full bg-[#5b3a39] flex items-center justify-center shadow-lg opacity-90">
+            <svg class="w-4 h-4 text-white/90 spin-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/>
+            </svg>
+          </div>
+          <span id="roomActionStatusLabel" class="text-[10px] font-extrabold tracking-widest uppercase text-slate-300 mt-1.5">WAITING FOR HOST</span>
+        `;
       }
     }
-  }
+  };
 
   function renderTgChatInvitePreview() {
     const room = client.room;
@@ -1862,7 +2021,10 @@
           if (canPlay && match.hasDrawnThisTurn && match.drawnCardId && card.id !== match.drawnCardId) {
             canPlay = false;
           }
-          const isSelected = (client.selectedCardId === card.id);
+          if (!canPlay && client.selectedCardId === card.id) {
+            client.selectedCardId = null;
+          }
+          const isSelected = Boolean(canPlay && client.selectedCardId === card.id);
           const flipClass = (client.flipRevealCardId === card.id) ? ' hand-card-flip-in' : '';
           const stateClass = (canPlay ? 'card-active-playable' : 'card-dimmed') + (isSelected ? ' card-selected-lifted' : '') + flipClass + placeholderClass;
           return `<div class="hand-card-wrap ${stateClass}" data-wrap-card-id="${card.id}" style="margin-left:${mLeft}px;z-index:${zIdx};">${renderMatchoCard(card, '', '')}</div>`;
@@ -1942,6 +2104,27 @@
     clearDragLayerDom();
   }
 
+  const isCardCurrentlyPlayableByMe = window.__isCardCurrentlyPlayableByMe = function(cardId) {
+    if (!client.room || !client.room.match) return false;
+    const match = client.room.match;
+    if (match.status !== 'playing' || client.dealingInProgress) return false;
+    if (client.room.viewerRole === 'spectator') return false;
+    const mySeat = typeof client.room.viewerSeat === 'number' ? client.room.viewerSeat : 0;
+    if (match.turnIndex !== mySeat) return false;
+    const me = match.players && match.players[mySeat];
+    if (!me || !Array.isArray(me.hand)) return false;
+    const card = me.hand.find(c => c.id === Number(cardId));
+    if (!card) return false;
+    const topCard = match.discard && match.discard[match.discard.length - 1];
+    if (!UnoEngine.isCardPlayable(card, topCard, match.activeColor, match.pendingWild4)) {
+      return false;
+    }
+    if (match.hasDrawnThisTurn && match.drawnCardId && card.id !== match.drawnCardId) {
+      return false;
+    }
+    return true;
+  };
+
   // --- Clipping-Safe Floating Card-Lifting & 60FPS Pointer Drag-and-Drop Engine ---
   function setupHandDragAndLiftInteractions() {
     const handStrip = document.getElementById('bottomHandStrip');
@@ -1970,13 +2153,7 @@
       const card = hand.find(c => c.id === cardId);
       if (!card) return false;
 
-      const topCard = match.discard[match.discard.length - 1];
-      let playable = UnoEngine.isCardPlayable(card, topCard, match.activeColor, match.pendingWild4);
-      if (playable && match.hasDrawnThisTurn && match.drawnCardId && card.id !== match.drawnCardId) {
-        playable = false;
-      }
-
-      if (!playable) {
+      if (!isCardCurrentlyPlayableByMe(cardId)) {
         sfx('error');
         showToast('Card does not match color or number', 'error');
         return false;
@@ -2005,13 +2182,24 @@
     handStrip.addEventListener('pointerdown', (e) => {
       if (client.dealingInProgress) return;
       const wrapEl = e.target.closest('.hand-card-wrap');
-      if (!wrapEl) return;
+      if (!wrapEl) {
+        if (client.selectedCardId !== null) {
+          client.selectedCardId = null;
+          handStrip.querySelectorAll('.card-selected-lifted').forEach(w => w.classList.remove('card-selected-lifted'));
+        }
+        return;
+      }
       const cardId = Number(wrapEl.getAttribute('data-wrap-card-id'));
       if (!cardId) return;
 
       const hand = getMyPlayerHand();
       const cardObj = hand.find(c => c.id === cardId);
       if (!cardObj) return;
+
+      // Strictly block lifting or dragging unplayable cards or when it is not the player's turn!
+      if (!isCardCurrentlyPlayableByMe(cardId)) {
+        return;
+      }
 
       e.preventDefault();
 
@@ -2021,6 +2209,16 @@
         client.dragReturnTimer = null;
       }
       clearDragLayerDom();
+
+      // Measure card geometry BEFORE modifying selection classes so pointerOffset has zero jump
+      const frameRect = frameEl.getBoundingClientRect();
+      const cardEl = wrapEl.querySelector('.m-card') || wrapEl;
+      const cardRect = cardEl.getBoundingClientRect();
+      const cardWidth = cardRect.width || 88;
+      const cardHeight = cardRect.height || 132;
+
+      const pointerOffsetX = Math.max(10, Math.min(cardWidth - 10, e.clientX - cardRect.left));
+      const pointerOffsetY = Math.max(10, Math.min(cardHeight - 10, e.clientY - cardRect.top));
 
       // Capture pointer on the permanent parent container `handStrip` so DOM updates inside `handStrip` never lose capture!
       try { handStrip.setPointerCapture(e.pointerId); } catch (err) {}
@@ -2038,16 +2236,6 @@
 
       sfx('lift');
       haptic('light');
-
-      const frameRect = frameEl.getBoundingClientRect();
-      const cardEl = wrapEl.querySelector('.m-card') || wrapEl;
-      const cardRect = cardEl.getBoundingClientRect();
-      const cardWidth = cardRect.width || 88;
-      const cardHeight = cardRect.height || 132;
-
-      // Clamp pointer offset inside the card bounds so the card stays naturally anchored under the finger
-      const pointerOffsetX = Math.max(12, Math.min(cardWidth - 12, e.clientX - cardRect.left));
-      const pointerOffsetY = Math.max(12, Math.min(cardHeight - 12, e.clientY - cardRect.top));
 
       client.dragState = {
         pointerId: e.pointerId,
@@ -2084,7 +2272,7 @@
       ds.lastX = e.clientX;
       ds.lastY = e.clientY;
 
-      if (!ds.moved && Math.hypot(dx, dy) > 6) {
+      if (!ds.moved && Math.hypot(dx, dy) > 8) {
         ds.moved = true;
         // Create floating drag card inside #dragCardLayer (z-index: 120, outside all overflow-hidden & tier stacking contexts)
         dragLayer.innerHTML = '';
@@ -2109,8 +2297,8 @@
         const frameRect = frameEl.getBoundingClientRect();
         const x = (e.clientX - frameRect.left) - ds.pointerOffsetX;
         const y = (e.clientY - frameRect.top) - ds.pointerOffsetY;
-        const tilt = Math.max(-15, Math.min(15, dx * 0.07)).toFixed(1);
-        ds.proxyEl.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) rotate(${tilt}deg) scale(1.16)`;
+        const tilt = Math.max(-10, Math.min(10, dx * 0.05)).toFixed(1);
+        ds.proxyEl.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) rotate(${tilt}deg) scale(1.04)`;
 
         const discardEl = document.getElementById('centerDiscardStack');
         if (discardEl) {
@@ -2167,9 +2355,10 @@
         let targetX = ds.originLeft;
         let targetY = ds.originTop;
         if (slotEl) {
-          const sRect = slotEl.getBoundingClientRect();
+          const innerCard = slotEl.querySelector('.m-card') || slotEl;
+          const sRect = innerCard.getBoundingClientRect();
           targetX = sRect.left - frameRect.left;
-          targetY = (sRect.top - frameRect.top) - (client.selectedCardId === ds.cardId ? 34 : 0);
+          targetY = sRect.top - frameRect.top;
         }
 
         proxy.style.transition = 'transform 0.22s cubic-bezier(0.22, 1, 0.36, 1)';
@@ -2449,13 +2638,31 @@
     }
   }
 
+  const buildTelegramInviteDeepLink = window.__buildTelegramInviteDeepLink = function() {
+    const room = client.room;
+    if (room && room.inviteLink && /^https:\/\/t\.me\//i.test(room.inviteLink)) {
+      return room.inviteLink;
+    }
+    const botUsername = String(
+      (room && room.botUsername) || client.botUsername || 'matcho_bot'
+    ).replace(/^@/, '').trim() || 'matcho_bot';
+    const appShortName = String(
+      (room && room.appShortName) || client.appShortName || 'play'
+    ).replace(/[^A-Za-z0-9_-]/g, '').trim() || 'play';
+    const roomId = (room && room.id) || client.roomId || 'uno_matcho';
+    const inviteToken = (room && room.inviteToken) || (`room_${roomId}`);
+    return `https://t.me/${botUsername}/${appShortName}?startapp=${inviteToken}`;
+  };
+
   function shareOrCopyRoomLink() {
-    const roomId = client.roomId || 'uno_room';
-    const shareUrl = `${window.location.origin}${window.location.pathname}?startapp=room_${roomId}`;
+    const shareUrl = buildTelegramInviteDeepLink();
+    client.lastCopiedInviteLink = shareUrl;
+    const shareDisplay = document.getElementById('tgShareUrlDisplay');
+    if (shareDisplay) shareDisplay.textContent = shareUrl;
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(shareUrl).catch(() => {});
-      } else {
+      } else if (document.createElement) {
         const ta = document.createElement('textarea');
         ta.value = shareUrl;
         document.body.appendChild(ta);
@@ -2464,7 +2671,8 @@
         document.body.removeChild(ta);
       }
     } catch (e) {}
-    showToast('Room invite link copied!', 'success');
+    showToast('Telegram invite link copied!', 'success');
+    return shareUrl;
   }
 
   function syncSettingsSwitchesUI() {
@@ -2605,9 +2813,7 @@
     (document.getElementById('roomShareInviteBtn') || {addEventListener:function(){}}).addEventListener('click', () => {
       shareOrCopyRoomLink();
     });
-    (document.getElementById('roomAddAiBotBtn') || {addEventListener:function(){}}).addEventListener('click', () => {
-      sendServerCommand({ type: 'ADD_BOT' });
-    });
+    // Note: #roomAddAiBotBtn is a waiting-for-players visual indicator and intentionally does NOT add an AI bot when clicked.
 
     (document.getElementById('centerDrawDeck') || {addEventListener:function(){}}).addEventListener('click', () => {
       sendServerCommand({ type: 'DRAW_CARD' });

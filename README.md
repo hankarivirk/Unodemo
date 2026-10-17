@@ -104,6 +104,7 @@ runMigration();
 | `DB_AUTO_FALLBACK` | No (`false` in prod) | `true` (dev) | Whether startup can fall back to JSON in local dev if primary DB fails. |
 | `DB_CONNECTION_TIMEOUT_MS` | No | `5000` | Connection timeout in milliseconds for Postgres, MongoDB, SQLite, and Redis. |
 | `REDIS_URL` | No | `""` | Optional Redis URL (`redis://` or `rediss://`) for caching & locks. |
+| `WAITING_ROOM_TIMEOUT_MS` | No | `300000` (5 min) | Waiting-room expiration timeout in milliseconds before unstarted lobbies expire. |
 
 ---
 
@@ -134,3 +135,55 @@ The game preserves Telegram's genuine native header (`✕ Close` / `← Back` an
 2. Install optional database drivers if using cloud PostgreSQL (`npm install pg`) or MongoDB Atlas (`npm install mongodb`). SQLite3 and Redis work out-of-the-box.
 3. Configure production environment variables (`NODE_ENV=production`, `ALLOW_DEV_AUTH=false`, strong `SESSION_SECRET`, `BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `PUBLIC_APP_URL`, `ALLOWED_ORIGINS`, and `DATABASE_URL` or `MONGODB_URI`).
 4. Verify `/api/health` returns `{"ok":true,"status":"healthy","isProduction":true}`.
+
+
+## Telegram `@BotFather` & Railway Configuration Guide
+
+### 1. Required `@BotFather` Setup
+1. **Register Mini App Short Name (`/newapp`)**:
+   - Message `@BotFather` -> `/newapp` -> select your bot.
+   - Enter title (`Matcho!`), description, icon (`640x360` PNG/JPG), and Web App URL (`https://<your-railway-domain>`).
+   - Set the **short name** to match `APP_SHORT_NAME` in `.env` (default: `play`).
+   - This enables canonical Telegram Mini App deep links:
+     `https://t.me/<BOT_USERNAME>/<APP_SHORT_NAME>?startapp=<room_token>`
+2. **Enable Inline Mode (`/setinline` & `/setinlinefeedback`)**:
+   - Send `/setinline` to `@BotFather`, select your bot, and set placeholder text (e.g. `Play Matcho! (4P or 2P)`).
+   - Send `/setinlinefeedback` -> select your bot -> set to **Enabled (100%)** so Telegram delivers `chosen_inline_result` updates (`inline_message_id`) for live message score/player updates.
+3. **Register Bot Commands (`/setcommands`)**:
+   - Send `/setcommands` to `@BotFather` and paste:
+     ```text
+     start - Launch Matcho! menu (Play with a Friend, Solo vs Utya, Rules)
+     play - Create a 4-player Matcho! room
+     friend - Create a 2-player friend duel room
+     solo - Play on your own against Utya (AI Bot)
+     rules - View Matcho! rules and quick guide
+     ```
+
+### 2. Required Railway / Production Environment Variables
+- `NODE_ENV=production`
+- `ALLOW_DEV_AUTH=false`
+- `BOT_TOKEN=<bot_id>:<secret>` (from `@BotFather`)
+- `BOT_USERNAME=<your_bot_username_without_at>`
+- `APP_SHORT_NAME=play` (must match `/newapp` short name in `@BotFather`)
+- `SESSION_SECRET=<at_least_32_random_hex_chars>`
+- `TELEGRAM_WEBHOOK_SECRET=<16_to_256_random_chars>`
+- `PUBLIC_APP_URL=https://<your-app>.up.railway.app`
+- `ALLOWED_ORIGINS=https://<your-app>.up.railway.app`
+- `DATABASE_PROVIDER=postgres` (or `mongodb` / `sqlite` / `auto`)
+- `DATABASE_URL=postgresql://...` (Neon / Railway PostgreSQL connection string)
+- **Scaling Note**: Active WebSocket room subscriptions (`roomSubscriptions`) are managed in-memory per Node.js process; deploy with **1 replica** unless a cross-node pub/sub bus is added.
+
+### 3. Platform Note on `inline_message_id` & Single-Instance Memory State
+- **Telegram Inline Message Association**: Telegram only sends `chosen_inline_result` (which contains `inline_message_id` immediately upon publishing an inline card) when **Inline Feedback** (`/setinlinefeedback` -> **Enabled / 100%**) is turned on in `@BotFather` and `allowed_updates` includes `"chosen_inline_result"`. As a supported fallback when inline feedback is not yet enabled, `bot/telegram_bot.js` also captures `cb.inline_message_id` on the first button callback (`join_<roomId>` or `spec_<roomId>`) and stores it on the room record.
+- **Single-Instance Process Memory**: Active WebSocket room subscriptions (`roomSubscriptions`), per-room waiting expiration timers (`waitingExpiryTimers`), and AI bot turn timers (`botTurnTimers`) are stored in Node.js process memory. Deploy as a single instance (1 replica) unless a shared Redis Pub/Sub broadcast bus is added.
+
+### 4. Inline Publication & Expiration Lifecycle (Platform Limitation & Recovery)
+- **Two-Stage Inline Room Lifecycle (`is_published` & `markRoomPublished`)**:
+  1. **Unpublished Inline Draft Stage (`inline_query`)**: Typing `@<bot_username>` creates (or reuses) an unpublished 1-player draft room (`is_published: false`, `published_at: null`) and responds to `answerInlineQuery` with `cache_time: 0` and `is_personal: true`. Repeated keystrokes from the same user within the reuse window refresh and reuse this single unpublished draft so unlimited abandoned rooms are never created.
+  2. **Published Lobby Stage (`chosen_inline_result` / first `callback_query`)**: When the user selects the inline result and Telegram delivers `chosen_inline_result` with `inline_message_id`, `roomManager.markRoomPublished()` transitions the room to `is_published: true`, sets `published_at`, and anchors a full `WAITING_ROOM_TIMEOUT_MS` (default 5 minutes) countdown from the moment of publication.
+- **Telegram Client Popup Timing Limitation & Immediate Server-Side Recovery**:
+  - In Telegram's Bot API protocol, `answerInlineQuery` returns the initial `input_message_content` payload to the user's Telegram client. If a user leaves the inline query popup open in their Telegram client for longer than the 5-minute timeout and then taps the cached popup card, Telegram's client posts the initial message to the chat **before** sending `chosen_inline_result` (with `inline_message_id`) to the bot server.
+  - Because Telegram does not provide a synchronous pre-publish hook to block a client from sending an already-rendered inline popup item, `TelegramBotController` implements the safest supported recovery:
+    1. `answerInlineQuery` sets `cache_time: 0` and verifies the room is active and non-expired before returning results.
+    2. When `chosen_inline_result` arrives for a room that already expired before publication (or when `chosen_inline_result` is delayed until after expiration), `markRoomPublished()` **never skips the expired room** — it binds `inline_message_id` to the expired room record and **immediately** invokes `editMessageText` to overwrite the published message with `⏳ Game Expired` and the `🔄 Play Again` (`switch_inline_query_current_chat`) button.
+    3. If `/setinlinefeedback` is disabled in `@BotFather` (so `chosen_inline_result` is not delivered by Telegram), the very first button callback (`join_<roomId>` or `spec_<roomId>`) captures `cb.inline_message_id` via `markRoomPublished()`; if the room has expired, it immediately edits the message to `⏳ Game Expired` with `🔄 Play Again` and alerts the user.

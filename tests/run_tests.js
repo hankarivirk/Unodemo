@@ -236,7 +236,7 @@ function cleanupFilePair(basePath) {
 
 async function main() {
   console.log('======================================================================');
-  console.log(' UNO Royale / Matcho! — 28-Point Automated Production & Multi-DB Suite');
+  console.log(' UNO Royale / Matcho! — 37-Point Automated Production & Multi-DB Suite');
   console.log('======================================================================');
 
   cleanupFilePair(TEST_DB_PATH);
@@ -1428,8 +1428,1037 @@ async function main() {
     assert.strictEqual(matchState.turnIndex, 1, 'Turn advanced to Player 2 after drawing');
   });
 
+
+  // Test 29: Deep-Link Room Tokens, Opaque Shared-Room Joining, Session Account-Switch Protection & Launch-Token Room Scoping
+  await runTest('29. Deep-link startapp tokens, opaque shared-room joining, session account-switch protection & launch-token scoping', async () => {
+    const { createRoomInviteToken, signSessionToken } = require('../server/telegram_auth');
+
+    // 1. Signed room token format (`https://t.me/<bot>/<app>?startapp=<token>`)
+    const tokenPlayer = createRoomInviteToken('uno_room99', 'player', TEST_SESSION_SECRET);
+    assert(/^[A-Za-z0-9_-]{1,64}$/.test(tokenPlayer), 'Signed startapp token uses only Telegram-allowed characters');
+    assert(!tokenPlayer.includes('.'), 'Signed startapp token contains no dots');
+
+    const parsedValid = parseStartParam(tokenPlayer, TEST_SESSION_SECRET);
+    assert.strictEqual(parsedValid.valid, true);
+    assert.strictEqual(parsedValid.roomId, 'uno_room99');
+    assert.strictEqual(parsedValid.mode, 'player');
+    assert.strictEqual(parsedValid.signed, true);
+
+    // Tampered HMAC signature must be rejected
+    const tamperedToken = tokenPlayer.slice(0, -2) + (tokenPlayer.endsWith('AA') ? 'BB' : 'AA');
+    const parsedTampered = parseStartParam(tamperedToken, TEST_SESSION_SECRET);
+    assert.strictEqual(parsedTampered.valid, false);
+    assert.strictEqual(parsedTampered.code, 'INVALID_INVITE_SIGNATURE');
+
+    // Expired base64url token must be rejected
+    const expiredB64 = Buffer.from(JSON.stringify({ r: 'uno_room99', exp: Date.now() - 5000 }), 'utf8').toString('base64url');
+    const parsedExpired = parseStartParam(expiredB64, TEST_SESSION_SECRET);
+    assert.strictEqual(parsedExpired.valid, false);
+    assert.strictEqual(parsedExpired.code, 'EXPIRED_INVITE_TOKEN');
+
+    // Opaque startapp token maps deterministically to the same canonical room ID
+    const opaque1 = parseStartParam('MatchoOpaqueInvite2026XyZ', TEST_SESSION_SECRET);
+    const opaque2 = parseStartParam('MatchoOpaqueInvite2026XyZ', TEST_SESSION_SECRET);
+    assert.strictEqual(opaque1.valid, true);
+    assert.strictEqual(opaque1.isOpaqueInvite, true);
+    assert.strictEqual(opaque1.roomId, opaque2.roomId);
+
+    const srv = createUnoServer({
+      skipDotEnv: true,
+      isProduction: true,
+      nodeEnv: 'production',
+      port: 0,
+      botToken: TEST_BOT_TOKEN,
+      botUsername: 'matcho_bot',
+      appShortName: 'play',
+      sessionSecret: TEST_SESSION_SECRET,
+      webhookSecret: TEST_WEBHOOK_SECRET,
+      webAppUrl: TEST_TRUSTED_ORIGIN,
+      allowedOrigins: [TEST_TRUSTED_ORIGIN],
+      allowDevAuth: false,
+      dbFilePath: TEST_DB_PATH
+    });
+    const port = await srv.start(0);
+
+    try {
+      const userA = { id: '7001', first_name: 'Alice', username: 'alice' };
+      const userB = { id: '7002', first_name: 'Bob', username: 'bob' };
+
+      // 2. Both players opening the same opaque startapp link join the EXACT SAME room
+      const wsA = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const wsB = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+
+      const joinAP = waitForWsMessage(wsA, m => m.type === 'ROOM_JOINED');
+      wsA.sendJSON({
+        type: 'AUTH_JOIN',
+        initData: createSignedInitData(userA, TEST_BOT_TOKEN, 'MatchoOpaqueInvite2026XyZ'),
+        startParam: 'MatchoOpaqueInvite2026XyZ'
+      });
+      const joinedA = await joinAP;
+      assert.strictEqual(joinedA.seat, 0);
+      assert(joinedA.room.inviteLink.startsWith('https://t.me/matcho_bot/play?startapp='), 'Room state includes canonical Telegram Mini App deep link');
+
+      const joinBP = waitForWsMessage(wsB, m => m.type === 'ROOM_JOINED');
+      wsB.sendJSON({
+        type: 'AUTH_JOIN',
+        initData: createSignedInitData(userB, TEST_BOT_TOKEN, 'MatchoOpaqueInvite2026XyZ'),
+        startParam: 'MatchoOpaqueInvite2026XyZ'
+      });
+      const joinedB = await joinBP;
+      assert.strictEqual(joinedB.room.id, joinedA.room.id, 'Both players using the same opaque invite enter the exact same room');
+      assert.strictEqual(joinedB.seat, 1);
+      assert.strictEqual(joinedB.room.players.length, 2);
+
+      // 3. Session Account-Switch Protection: User B sending valid initData + User A's stale sessionToken MUST authenticate as User B
+      const authSwitchRes = await httpRequestJson(port, 'POST', '/api/auth', {
+        initData: createSignedInitData(userB, TEST_BOT_TOKEN),
+        sessionToken: joinedA.sessionToken // Stale token belonging to User A!
+      });
+      assert.strictEqual(authSwitchRes.status, 200);
+      assert.strictEqual(authSwitchRes.data.user.id, '7002', 'Live signed initData overrides stale sessionToken from previous account');
+
+      // 4. Launch-Token Room Scoping: launchToken bound to room_1 cannot join room_2
+      const scopedLaunchToken = signSessionToken({
+        kind: 'launch',
+        roomId: 'uno_room_alpha',
+        user: userA,
+        exp: Date.now() + 60000
+      }, TEST_SESSION_SECRET);
+
+      const wsC = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const errP = waitForWsMessage(wsC, m => m.type === 'ERROR');
+      wsC.sendJSON({
+        type: 'AUTH_JOIN',
+        roomId: 'uno_room_beta',
+        launchToken: scopedLaunchToken
+      });
+      const errMsg = await errP;
+      assert.strictEqual(errMsg.code, 'LAUNCH_TOKEN_ROOM_MISMATCH', 'Launch token rejected when used for a different room');
+
+      wsA.close();
+      wsB.close();
+      wsC.close();
+    } finally {
+      await srv.stop();
+      cleanupFilePair(TEST_DB_PATH);
+    }
+  });
+
+  // Test 30: Legal-Only Card Lifting/Dragging, Finger-Release Hit Testing & Telegram Deep-Link Copy
+  await runTest('30. Legal-only card lifting/dragging, pointer-release discard hit-testing & Telegram deep-link generation', async () => {
+    const vm = require('node:vm');
+    const jsText = fs.readFileSync(path.join(__dirname, '..', 'js', 'game.js'), 'utf8');
+    const mockDiscardRect = { left: 82, top: 310, right: 188, bottom: 466, width: 106, height: 156 };
+
+    const sandbox = {
+      window: { innerWidth: 384, location: { search: '', hash: '', protocol: 'file:', host: '', origin: 'https://uno.example.com', pathname: '/' }, addEventListener() {} },
+      document: {
+        readyState: 'loading',
+        addEventListener() {},
+        getElementById(id) {
+          if (id === 'centerDiscardStack') {
+            return { getBoundingClientRect: () => mockDiscardRect, classList: { add() {}, remove() {} } };
+          }
+          return { clientWidth: 384, classList: { add() {}, remove() {}, toggle() {} }, addEventListener() {}, querySelectorAll() { return []; }, querySelector() { return null; }, style: { setProperty() {} } };
+        }
+      },
+      localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+      sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+      URLSearchParams,
+      UnoEngine,
+      setTimeout() { return 1; },
+      clearTimeout() {},
+      setInterval() { return 1; },
+      clearInterval() {}
+    };
+    sandbox.window.UnoEngine = UnoEngine;
+    sandbox.window.localStorage = sandbox.localStorage;
+    sandbox.window.sessionStorage = sandbox.sessionStorage;
+    vm.createContext(sandbox);
+    vm.runInContext(jsText, sandbox);
+
+    const isCardPlayableByMe = sandbox.window.__isCardCurrentlyPlayableByMe;
+    const isDropOverDiscard = sandbox.window.__isDropOverDiscardTarget;
+    const buildDeepLink = sandbox.window.__buildTelegramInviteDeepLink;
+    const client = sandbox.window.__matchoClient;
+
+    // Configure active match state in client: activeColor = 'blue', top discard = Blue 6
+    client.dealingInProgress = false;
+    client.room = {
+      id: 'uno_test30',
+      botUsername: 'matcho_bot',
+      appShortName: 'play',
+      inviteToken: 'room_uno_test30__AbCdEf1234',
+      inviteLink: 'https://t.me/matcho_bot/play?startapp=room_uno_test30__AbCdEf1234',
+      viewerRole: 'player',
+      viewerSeat: 0,
+      match: {
+        status: 'playing',
+        turnIndex: 0,
+        activeColor: 'blue',
+        hasDrawnThisTurn: false,
+        drawnCardId: null,
+        pendingWild4: null,
+        discard: [{ id: 100, color: 'blue', value: '6', label: '6' }],
+        players: [
+          {
+            id: 'p1',
+            seat: 0,
+            hand: [
+              { id: 1, color: 'red', value: '2', label: '2' },    // Unplayable!
+              { id: 2, color: 'blue', value: '9', label: '9' },   // Playable!
+              { id: 3, color: 'wild', value: 'wild', label: '?' } // Playable!
+            ]
+          },
+          { id: 'p2', seat: 1, hand: [] }
+        ]
+      }
+    };
+
+    assert.strictEqual(isCardPlayableByMe(1), false, 'Red 2 on Blue 6 must NOT be playable or draggable');
+    assert.strictEqual(isCardPlayableByMe(2), true, 'Blue 9 on Blue 6 is playable and draggable');
+    assert.strictEqual(isCardPlayableByMe(3), true, 'Wild card on Blue 6 is playable and draggable');
+
+    // Out-of-turn check: when turnIndex is 1 (opponent's turn), NO card in player's hand is liftable/draggable
+    client.room.match.turnIndex = 1;
+    assert.strictEqual(isCardPlayableByMe(2), false, 'Playable card is NOT liftable/draggable during opponent turn');
+    client.room.match.turnIndex = 0;
+
+    // False-positive overlap rejection: card top overlaps discard pile, but finger release point (clientY=530) is down near hand
+    const overlappingCardRectFarFinger = { left: 90, top: 410, right: 178, bottom: 542, width: 88, height: 132 };
+    assert.strictEqual(
+      isDropOverDiscard(134, 530, overlappingCardRectFarFinger),
+      false,
+      'Drop MUST be rejected when finger release point (y=530) is far below discard pile even if card top overlaps'
+    );
+
+    // Valid drop when finger is released over discard pile (x=135, y=390)
+    const validCardRect = { left: 91, top: 324, right: 179, bottom: 456, width: 88, height: 132 };
+    assert.strictEqual(
+      isDropOverDiscard(135, 390, validCardRect),
+      true,
+      'Drop accepted when finger release point is over #centerDiscardStack'
+    );
+
+    // Verify Invite Friends link is a real Telegram Mini App deep link
+    const link = buildDeepLink();
+    assert.strictEqual(link, 'https://t.me/matcho_bot/play?startapp=room_uno_test30__AbCdEf1234');
+  });
+
+  // Test 31: Bot Private DM /start Menu (Play with a Friend, Play on Your Own, Rules), 2P Room Capacity, Inline Room Deduplication & /play@bot
+  await runTest('31. Bot private DM /start menu, 2P friend room capacity, inline query room reuse & /play@bot normalization', async () => {
+    const apiCalls = [];
+    const srv = createUnoServer({
+      skipDotEnv: true,
+      isProduction: true,
+      nodeEnv: 'production',
+      port: 0,
+      botToken: TEST_BOT_TOKEN,
+      botUsername: 'matcho_bot',
+      appShortName: 'play',
+      sessionSecret: TEST_SESSION_SECRET,
+      webhookSecret: TEST_WEBHOOK_SECRET,
+      webAppUrl: TEST_TRUSTED_ORIGIN,
+      allowedOrigins: [TEST_TRUSTED_ORIGIN],
+      allowDevAuth: false,
+      dbFilePath: TEST_DB_PATH,
+      telegramApiCaller: async (method, payload) => {
+        apiCalls.push({ method, payload });
+        return { ok: true, result: { message_id: apiCalls.length + 100 } };
+      }
+    });
+    await srv.start(0);
+
+    try {
+      const hostUser = { id: 8801, first_name: 'HostUser', username: 'host_u' };
+
+      // 1. Private DM /start shows Play with a Friend, Play on Your Own, Rules / Quick Guide, and Open Matcho! Room
+      await srv.botController.handleUpdate({
+        message: {
+          message_id: 1,
+          from: hostUser,
+          chat: { id: 8801, type: 'private' },
+          text: '/start'
+        }
+      });
+      const startKeyboard = apiCalls[0].payload.reply_markup.inline_keyboard;
+      const flatButtons = startKeyboard.reduce((acc, r) => acc.concat(r), []);
+      assert(flatButtons.some(b => b.callback_data === 'cmd_play_friend'), '/start includes Play with a Friend option');
+      assert(flatButtons.some(b => b.web_app && b.web_app.url.includes('practice_utya')), '/start includes Play on Your Own web_app option');
+      assert(flatButtons.some(b => b.callback_data === 'cmd_rules'), '/start includes Rules / Quick Guide option');
+
+      // 2. Clicking Play with a Friend creates a 2-player room (maxPlayers: 2)
+      apiCalls.length = 0;
+      const friendRes = await srv.botController.handleUpdate({
+        callback_query: {
+          id: 'cb_friend_1',
+          from: hostUser,
+          message: { chat: { id: 8801, type: 'private' } },
+          data: 'cmd_play_friend'
+        }
+      });
+      assert(friendRes, 'Play with a Friend callback handled');
+      const sentFriendMsg = apiCalls.find(c => c.method === 'sendMessage');
+      assert(sentFriendMsg.payload.text.includes('(1/2)'), '2-player friend room displays 1/2 capacity');
+      assert(sentFriendMsg.payload.text.includes('https://t.me/matcho_bot/play?startapp='), '2P room message includes Telegram deep link');
+
+      // Extract the 2P room ID and verify a 2nd player can join, while a 3rd player is rejected with ROOM_FULL
+      const room2pMatch = /Room ID: <code>(uno_[a-zA-Z0-9_-]+)<\/code>/.exec(sentFriendMsg.payload.text);
+      assert(room2pMatch, 'Extracted 2P room ID');
+      const room2pId = room2pMatch[1];
+
+      const join2 = await srv.roomManager.joinRoom(room2pId, { id: '8802', first_name: 'FriendTwo' }, 'player');
+      assert.strictEqual(join2.ok, true);
+      assert.strictEqual(join2.room.players.length, 2);
+
+      const join3 = await srv.roomManager.joinRoom(room2pId, { id: '8803', first_name: 'ThirdWheel' }, 'player');
+      assert.strictEqual(join3.ok, false);
+      assert.strictEqual(join3.code, 'ROOM_FULL', '2-player friend room rejects 3rd player with ROOM_FULL');
+
+      // 3. Repeated inline queries from the same user reuse the same unstarted waiting room
+      apiCalls.length = 0;
+      const iqUser = { id: 8899, first_name: 'InlineTyper' };
+      await srv.botController.handleUpdate({ inline_query: { id: 'iq_a', from: iqUser, query: '' } });
+      await srv.botController.handleUpdate({ inline_query: { id: 'iq_b', from: iqUser, query: 'm' } });
+      assert.strictEqual(apiCalls.length, 2);
+      const roomIdA = apiCalls[0].payload.results[0].id;
+      const roomIdB = apiCalls[1].payload.results[0].id;
+      assert.strictEqual(roomIdA, roomIdB, 'Repeated inline queries reuse the same unstarted waiting room');
+
+      // 4. Command @botusername normalization: /play@matcho_bot works, /play@other_bot is ignored
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({
+        message: { message_id: 2, from: hostUser, chat: { id: -100555, type: 'supergroup' }, text: '/play@other_bot' }
+      });
+      assert.strictEqual(apiCalls.length, 0, 'Command addressed to @other_bot is ignored');
+
+      await srv.botController.handleUpdate({
+        message: { message_id: 3, from: hostUser, chat: { id: -100555, type: 'supergroup' }, text: '/play@matcho_bot' }
+      });
+      assert.strictEqual(apiCalls.length, 1, 'Command addressed to @matcho_bot is processed');
+    } finally {
+      await srv.stop();
+      cleanupFilePair(TEST_DB_PATH);
+    }
+  });
+
+  // Test 32: Lobby Host vs. Non-Host Start Button, LEAVE_ROOM Host Migration & Standalone HTML Bundle Parity
+  await runTest('32. Lobby host vs. non-host START button, LEAVE_ROOM host migration & standalone HTML bundle consistency', async () => {
+    // 1. Verify standalone uno_telegram_miniapp.html bundle contains exact CSS, shared engine, and game.js
+    const rootDir = path.join(__dirname, '..');
+    const cssText = fs.readFileSync(path.join(rootDir, 'css', 'styles.css'), 'utf8');
+    const engineText = fs.readFileSync(path.join(rootDir, 'shared', 'uno_engine.js'), 'utf8');
+    const gameText = fs.readFileSync(path.join(rootDir, 'js', 'game.js'), 'utf8');
+    const bundleText = fs.readFileSync(path.join(rootDir, 'uno_telegram_miniapp.html'), 'utf8');
+
+    assert(bundleText.includes('<script src="https://telegram.org/js/telegram-web-app.js"></script>'), 'Bundle loads telegram-web-app.js synchronously');
+    assert(bundleText.includes(cssText.trim()), 'Bundle CSS matches css/styles.css');
+    assert(bundleText.includes(engineText.trim()), 'Bundle engine matches shared/uno_engine.js');
+    assert(bundleText.includes(gameText.trim()), 'Bundle client matches js/game.js');
+
+    // 2. Verify Lobby UI rendering for 1/4 waiting, 2/4 Host (START button), and 2/4 Non-Host (WAITING FOR HOST)
+    const vm = require('node:vm');
+    const elements = {
+      roomPlayerCountText: { textContent: '' },
+      roomStatusSubtitle: { textContent: '' },
+      roomPlayersList: { innerHTML: '' },
+      roomCenterActionWrap: { innerHTML: '' },
+      roomWaitOrStartBtn: { addEventListener() {} },
+      roomCopyInvitePillBtn: { addEventListener() {} }
+    };
+    const sandbox = {
+      window: { innerWidth: 384, location: { search: '?uid=host_1', hash: '', protocol: 'https:', host: 'uno.example.com', origin: 'https://uno.example.com', pathname: '/' }, addEventListener() {} },
+      document: {
+        readyState: 'loading',
+        addEventListener() {},
+        getElementById(id) {
+          return elements[id] || { clientWidth: 384, classList: { add() {}, remove() {}, toggle() {} }, addEventListener() {}, querySelectorAll() { return []; }, querySelector() { return null; }, style: { setProperty() {} } };
+        }
+      },
+      localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+      sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+      URLSearchParams,
+      UnoEngine,
+      setTimeout() { return 1; },
+      clearTimeout() {},
+      setInterval() { return 1; },
+      clearInterval() {}
+    };
+    sandbox.window.UnoEngine = UnoEngine;
+    sandbox.window.localStorage = sandbox.localStorage;
+    sandbox.window.sessionStorage = sandbox.sessionStorage;
+    vm.createContext(sandbox);
+    vm.runInContext(gameText, sandbox);
+
+    const client = sandbox.window.__matchoClient;
+    const renderRoomLobby = sandbox.window.__renderRoomLobby;
+    client.mode = 'online';
+
+    // Case A: 1 / 2 incomplete room -> shows WAITING status, no START button
+    client.room = {
+      id: 'uno_lobby_test',
+      hostId: 'host_1',
+      maxPlayers: 2,
+      status: 'waiting',
+      players: [{ id: 'host_1', name: 'Host', initials: 'HO', color: '#475569', isBot: false }]
+    };
+    renderRoomLobby();
+    assert.strictEqual(elements.roomPlayerCountText.textContent, '1 / 2');
+    assert(elements.roomCenterActionWrap.innerHTML.includes('WAITING'), 'Incomplete room displays WAITING status');
+    assert(!elements.roomCenterActionWrap.innerHTML.includes('>START<'), 'Incomplete room does not display START');
+
+    // Case B: 2 / 2 room viewed by Host -> shows clickable <button id="roomWaitOrStartBtn"> and START
+    client.room.players.push({ id: 'guest_2', name: 'Guest', initials: 'GU', color: '#ff5c6c', isBot: false });
+    renderRoomLobby();
+    assert.strictEqual(elements.roomPlayerCountText.textContent, '2 / 2');
+    assert(elements.roomCenterActionWrap.innerHTML.includes('<button id="roomWaitOrStartBtn"'), 'Host sees clickable START button when >=2 players');
+    assert(elements.roomCenterActionWrap.innerHTML.includes('>START<'), 'Host sees START label');
+
+    // Case C: 2 / 2 room viewed by Non-Host -> shows non-clickable WAITING FOR HOST indicator
+    client.room.hostId = 'other_host_99';
+    renderRoomLobby();
+    assert(elements.roomCenterActionWrap.innerHTML.includes('WAITING FOR HOST'), 'Non-host sees WAITING FOR HOST status');
+    assert(!elements.roomCenterActionWrap.innerHTML.includes('<button id="roomWaitOrStartBtn"'), 'Non-host does NOT see a clickable START button');
+  });
+
+
+  // Test 33: CRITICAL SECURITY REGRESSION SUITE — Launch-Token Room Binding (All 8 Required Authorization Cases)
+  await runTest('33. Security: Launch-token room binding across startParam, direct roomId, cached sessionToken, and expired/malformed tokens', async () => {
+    const { createRoomInviteToken, signSessionToken } = require('../server/telegram_auth');
+
+    const srv = createUnoServer({
+      skipDotEnv: true,
+      isProduction: true,
+      nodeEnv: 'production',
+      port: 0,
+      botToken: TEST_BOT_TOKEN,
+      botUsername: 'matcho_bot',
+      appShortName: 'play',
+      sessionSecret: TEST_SESSION_SECRET,
+      webhookSecret: TEST_WEBHOOK_SECRET,
+      webAppUrl: TEST_TRUSTED_ORIGIN,
+      allowedOrigins: [TEST_TRUSTED_ORIGIN],
+      allowDevAuth: false,
+      dbFilePath: TEST_DB_PATH
+    });
+    const port = await srv.start(0);
+
+    try {
+      const hostA = { id: '9101', first_name: 'HostAlpha', username: 'host_a' };
+      const hostB = { id: '9102', first_name: 'HostBeta', username: 'host_b' };
+      const guest = { id: '9103', first_name: 'GuestUser', username: 'guest_u' };
+
+      const roomARes = await srv.roomManager.createRoom(hostA, { maxPlayers: 2, roomMode: 'friend_2p' });
+      const roomBRes = await srv.roomManager.createRoom(hostB, { maxPlayers: 2, roomMode: 'friend_2p' });
+      const roomAId = roomARes.room.id;
+      const roomBId = roomBRes.room.id;
+
+      const inviteTokenA = createRoomInviteToken(roomAId, 'player', TEST_SESSION_SECRET);
+      const inviteTokenB = createRoomInviteToken(roomBId, 'player', TEST_SESSION_SECRET);
+
+      // Mint a valid launch token strictly bound to Room A for guest
+      const launchTokenRoomA = signSessionToken({
+        kind: 'launch',
+        roomId: roomAId,
+        mode: 'player',
+        user: guest,
+        startParam: inviteTokenA,
+        exp: Date.now() + 60000
+      }, TEST_SESSION_SECRET);
+
+      // Mint a general cached sessionToken for guest (e.g. from an earlier session)
+      const cachedSessionToken = signSessionToken({
+        user: guest,
+        exp: Date.now() + 3600000
+      }, TEST_SESSION_SECRET);
+
+      // Case 1: Valid launch token for Room A with startParam resolving to Room B MUST be rejected
+      const ws1 = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const err1P = waitForWsMessage(ws1, m => m.type === 'ERROR');
+      ws1.sendJSON({
+        type: 'AUTH_JOIN',
+        launchToken: launchTokenRoomA,
+        startParam: inviteTokenB
+      });
+      const err1 = await err1P;
+      assert.strictEqual(err1.code, 'LAUNCH_TOKEN_ROOM_MISMATCH', 'Launch token for Room A with startParam for Room B rejected');
+      ws1.close();
+
+      // Also test standard room_uno_xxx startParam resolving to Room B
+      const ws1b = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const err1bP = waitForWsMessage(ws1b, m => m.type === 'ERROR');
+      ws1b.sendJSON({
+        type: 'AUTH_JOIN',
+        launchToken: launchTokenRoomA,
+        startParam: `room_${roomBId}`
+      });
+      const err1b = await err1bP;
+      assert.strictEqual(err1b.code, 'LAUNCH_TOKEN_ROOM_MISMATCH', 'Launch token for Room A with room_uno_B startParam rejected');
+      ws1b.close();
+
+      // Case 2: Valid launch token for Room A with direct roomId set to Room B MUST be rejected (WS and HTTP)
+      const ws2 = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const err2P = waitForWsMessage(ws2, m => m.type === 'ERROR');
+      ws2.sendJSON({
+        type: 'AUTH_JOIN',
+        roomId: roomBId,
+        launchToken: launchTokenRoomA
+      });
+      const err2 = await err2P;
+      assert.strictEqual(err2.code, 'LAUNCH_TOKEN_ROOM_MISMATCH', 'Launch token for Room A with direct roomId=RoomB rejected on WS');
+      ws2.close();
+
+      const httpJoinB = await httpRequestJson(port, 'POST', `/api/rooms/${roomBId}/join`, {
+        launchToken: launchTokenRoomA
+      });
+      assert.strictEqual(httpJoinB.status, 403);
+      assert.strictEqual(httpJoinB.data.code, 'LAUNCH_TOKEN_ROOM_MISMATCH', 'Launch token for Room A rejected on POST /api/rooms/RoomB/join');
+
+      // Case 3: Request containing a valid cached sessionToken PLUS a launchToken for Room A MUST NOT authorize joining Room B!
+      const ws3 = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const err3P = waitForWsMessage(ws3, m => m.type === 'ERROR');
+      ws3.sendJSON({
+        type: 'AUTH_JOIN',
+        sessionToken: cachedSessionToken,
+        launchToken: launchTokenRoomA,
+        roomId: roomBId
+      });
+      const err3 = await err3P;
+      assert.strictEqual(err3.code, 'LAUNCH_TOKEN_ROOM_MISMATCH', 'Cached sessionToken + launchToken(RoomA) rejected for direct roomId=RoomB');
+      ws3.close();
+
+      const ws3b = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const err3bP = waitForWsMessage(ws3b, m => m.type === 'ERROR');
+      ws3b.sendJSON({
+        type: 'AUTH_JOIN',
+        sessionToken: cachedSessionToken,
+        launchToken: launchTokenRoomA,
+        startParam: inviteTokenB
+      });
+      const err3b = await err3bP;
+      assert.strictEqual(err3b.code, 'LAUNCH_TOKEN_ROOM_MISMATCH', 'Cached sessionToken + launchToken(RoomA) rejected for startParam=RoomB');
+      ws3b.close();
+
+      const httpSessionPlusLaunch = await httpRequestJson(port, 'POST', `/api/rooms/${roomBId}/join`, {
+        sessionToken: cachedSessionToken,
+        launchToken: launchTokenRoomA
+      });
+      assert.strictEqual(httpSessionPlusLaunch.status, 403);
+      assert.strictEqual(httpSessionPlusLaunch.data.code, 'LAUNCH_TOKEN_ROOM_MISMATCH', 'HTTP join with cached sessionToken + launchToken(RoomA) rejected for RoomB');
+
+      // Also verify CREATE_ROOM with a room-scoped launchToken is rejected
+      const wsCreateMismatch = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const errCreateP = waitForWsMessage(wsCreateMismatch, m => m.type === 'ERROR');
+      wsCreateMismatch.sendJSON({
+        type: 'CREATE_ROOM',
+        sessionToken: cachedSessionToken,
+        launchToken: launchTokenRoomA
+      });
+      const errCreate = await errCreateP;
+      assert.strictEqual(errCreate.code, 'LAUNCH_TOKEN_ROOM_MISMATCH', 'Room-scoped launchToken cannot bypass scope via CREATE_ROOM');
+      wsCreateMismatch.close();
+
+      // Case 4: A launch token for Room A MUST still permit the intended join into Room A
+      const ws4 = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const join4P = waitForWsMessage(ws4, m => m.type === 'ROOM_JOINED');
+      ws4.sendJSON({
+        type: 'AUTH_JOIN',
+        sessionToken: cachedSessionToken,
+        launchToken: launchTokenRoomA,
+        startParam: inviteTokenA
+      });
+      const joined4 = await join4P;
+      assert.strictEqual(joined4.room.id, roomAId, 'Launch token for Room A permitted joining Room A');
+      assert.strictEqual(joined4.seat, 1);
+      ws4.close();
+
+      // Case 5 & 6: Valid Telegram initData authentication and legitimate friend invite links continue to work
+      const friendGuest = { id: '9104', first_name: 'FriendBeta', username: 'friend_b' };
+      const ws5 = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const join5P = waitForWsMessage(ws5, m => m.type === 'ROOM_JOINED');
+      ws5.sendJSON({
+        type: 'AUTH_JOIN',
+        initData: createSignedInitData(friendGuest, TEST_BOT_TOKEN, inviteTokenB),
+        startParam: inviteTokenB
+      });
+      const joined5 = await join5P;
+      assert.strictEqual(joined5.room.id, roomBId, 'Valid initData + legitimate friend invite link joined Room B');
+      assert.strictEqual(joined5.seat, 1);
+      ws5.close();
+
+      // Friend invite link for Room A combined with roomId=Room B must also be rejected
+      const wsCrossInvite = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const errCrossP = waitForWsMessage(wsCrossInvite, m => m.type === 'ERROR');
+      wsCrossInvite.sendJSON({
+        type: 'AUTH_JOIN',
+        initData: createSignedInitData(friendGuest, TEST_BOT_TOKEN, inviteTokenA),
+        roomId: roomBId,
+        startParam: inviteTokenA
+      });
+      const errCross = await errCrossP;
+      assert.strictEqual(errCross.code, 'LAUNCH_TOKEN_ROOM_MISMATCH', 'Invite link for Room A rejected when paired with roomId=Room B');
+      wsCrossInvite.close();
+
+      // Case 7: Malformed or expired launch tokens fail safely even if a valid cached sessionToken is also supplied
+      const expiredLaunchToken = signSessionToken({
+        kind: 'launch',
+        roomId: roomAId,
+        user: guest,
+        exp: Date.now() - 10000
+      }, TEST_SESSION_SECRET);
+
+      const wsExp = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const errExpP = waitForWsMessage(wsExp, m => m.type === 'ERROR');
+      wsExp.sendJSON({
+        type: 'AUTH_JOIN',
+        sessionToken: cachedSessionToken,
+        launchToken: expiredLaunchToken,
+        roomId: roomAId
+      });
+      const errExp = await errExpP;
+      assert.strictEqual(errExp.code, 'UNAUTHORIZED', 'Expired launch token rejected even when cached sessionToken is present');
+      wsExp.close();
+
+      const wsMalformed = await connectWebSocketClient(`ws://127.0.0.1:${port}/ws`, { origin: TEST_TRUSTED_ORIGIN });
+      const errMalP = waitForWsMessage(wsMalformed, m => m.type === 'ERROR');
+      wsMalformed.sendJSON({
+        type: 'AUTH_JOIN',
+        sessionToken: cachedSessionToken,
+        launchToken: 'malformed.launch.token.value',
+        roomId: roomAId
+      });
+      const errMal = await errMalP;
+      assert.strictEqual(errMal.code, 'UNAUTHORIZED', 'Malformed launch token rejected safely');
+      wsMalformed.close();
+    } finally {
+      await srv.stop();
+      cleanupFilePair(TEST_DB_PATH);
+    }
+  });
+
+  // Test 34: Inline UNO Lobby With Live Player Names, Duplicate-Join Idempotency & 4-Player Cap
+  await runTest('34. Inline UNO lobby live player names (🎮 UNO GROUP GAME, 👥 Players joined (X/4), ✅ Player Name), idempotency & 4P cap', async () => {
+    const apiCalls = [];
+    const srv = createUnoServer({
+      skipDotEnv: true,
+      isProduction: true,
+      nodeEnv: 'production',
+      port: 0,
+      botToken: TEST_BOT_TOKEN,
+      botUsername: 'matcho_bot',
+      appShortName: 'play',
+      sessionSecret: TEST_SESSION_SECRET,
+      webhookSecret: TEST_WEBHOOK_SECRET,
+      webAppUrl: TEST_TRUSTED_ORIGIN,
+      allowedOrigins: [TEST_TRUSTED_ORIGIN],
+      allowDevAuth: false,
+      dbFilePath: TEST_DB_PATH,
+      telegramApiCaller: async (method, payload) => {
+        apiCalls.push({ method, payload });
+        return { ok: true, result: { message_id: 501 } };
+      }
+    });
+    await srv.start(0);
+
+    try {
+      const p1 = { id: 9201, first_name: 'Player One', username: 'player_one' };
+      const p2 = { id: 9202, first_name: 'Player Two', username: 'player_two' };
+      const p3 = { id: 9203, first_name: 'Player Three' };
+      const p4 = { id: 9204, first_name: 'Player Four' };
+      const p5 = { id: 9205, first_name: 'Player Five' };
+
+      // 1. Host triggers inline_query in group
+      await srv.botController.handleUpdate({
+        inline_query: { id: 'iq_live_1', from: p1, query: '' }
+      });
+      const iqRes = apiCalls.find(c => c.method === 'answerInlineQuery');
+      const roomId = iqRes.payload.results[0].id;
+      const initialText = iqRes.payload.results[0].input_message_content.message_text;
+      assert(initialText.includes('🎮 <b>UNO GROUP GAME</b>'), 'Inline message includes 🎮 UNO GROUP GAME header');
+      assert(initialText.includes('👥 <b>Players joined (1/4)</b>'), 'Shows 1/4 players initially');
+      assert(initialText.includes('✅ <b>Player One</b> (@player_one)'), 'Shows host display name and @username');
+      assert(initialText.includes('⏳ Waiting for 3 more players...\nJoin the game below!'), 'Shows waiting count and join prompt');
+
+      // 2. Telegram delivers chosen_inline_result with inline_message_id
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({
+        chosen_inline_result: {
+          result_id: roomId,
+          from: p1,
+          inline_message_id: 'inline_msg_abc_123'
+        }
+      });
+
+      // 3. Player Two joins via callback button -> edits the SAME inline message (inline_msg_abc_123)
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({
+        callback_query: {
+          id: 'cb_join_p2',
+          from: p2,
+          inline_message_id: 'inline_msg_abc_123',
+          data: `join_${roomId}`
+        }
+      });
+      const editAfterP2 = apiCalls.find(c => c.method === 'editMessageText');
+      assert(editAfterP2, 'Original inline message edited when Player Two joins');
+      assert.strictEqual(editAfterP2.payload.inline_message_id, 'inline_msg_abc_123', 'Edits exact same inline_message_id');
+      assert(editAfterP2.payload.text.includes('👥 <b>Players joined (2/4)</b>'), 'Updated to 2/4 players');
+      assert(editAfterP2.payload.text.includes('✅ <b>Player One</b> (@player_one)'));
+      assert(editAfterP2.payload.text.includes('✅ <b>Player Two</b> (@player_two)'));
+      assert(editAfterP2.payload.text.includes('⏳ Waiting for 2 more players...\nJoin the game below!'));
+      assert(!apiCalls.some(c => c.method === 'sendMessage'), 'Never sends duplicate lobby messages on join');
+
+      // 4. Player Two presses Join again -> never counts the same Telegram user twice!
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({
+        callback_query: {
+          id: 'cb_join_p2_dup',
+          from: p2,
+          inline_message_id: 'inline_msg_abc_123',
+          data: `join_${roomId}`
+        }
+      });
+      const editAfterDup = apiCalls.find(c => c.method === 'editMessageText');
+      assert(editAfterDup.payload.text.includes('👥 <b>Players joined (2/4)</b>'), 'Duplicate join does not increment count beyond 2/4');
+
+      // 5. Players Three and Four join concurrently -> reaches 4/4, and Player Five is rejected with ROOM_FULL
+      await Promise.all([
+        srv.botController.handleUpdate({
+          callback_query: { id: 'cb_p3', from: p3, inline_message_id: 'inline_msg_abc_123', data: `join_${roomId}` }
+        }),
+        srv.botController.handleUpdate({
+          callback_query: { id: 'cb_p4', from: p4, inline_message_id: 'inline_msg_abc_123', data: `join_${roomId}` }
+        })
+      ]);
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({
+        callback_query: { id: 'cb_p5', from: p5, inline_message_id: 'inline_msg_abc_123', data: `join_${roomId}` }
+      });
+      const p5Alert = apiCalls.find(c => c.method === 'answerCallbackQuery');
+      assert.strictEqual(p5Alert.payload.show_alert, true, '5th player receives alert that room is full');
+    } finally {
+      await srv.stop();
+      cleanupFilePair(TEST_DB_PATH);
+    }
+  });
+
+  // Test 35: Automatic 5-Minute Lobby Expiration, Multi-Player Unstarted Expiration & Active Game Non-Expiration
+  await runTest('35. Automatic lobby expiration (5-min default, ⏳ Game Expired, 1P vs >=2P copy, active game non-expiration)', async () => {
+    const { DEFAULT_WAITING_ROOM_TIMEOUT_MS } = require('../server/room_manager');
+    assert.strictEqual(DEFAULT_WAITING_ROOM_TIMEOUT_MS, 5 * 60 * 1000, 'Default waiting-room timeout is 5 minutes (300,000 ms)');
+
+    const apiCalls = [];
+    const srv = createUnoServer({
+      skipDotEnv: true,
+      isProduction: true,
+      nodeEnv: 'production',
+      port: 0,
+      waitingRoomTimeoutMs: 70, // Fast 70ms timeout for automated verification
+      botToken: TEST_BOT_TOKEN,
+      botUsername: 'matcho_bot',
+      appShortName: 'play',
+      sessionSecret: TEST_SESSION_SECRET,
+      webhookSecret: TEST_WEBHOOK_SECRET,
+      webAppUrl: TEST_TRUSTED_ORIGIN,
+      allowedOrigins: [TEST_TRUSTED_ORIGIN],
+      allowDevAuth: false,
+      dbFilePath: TEST_DB_PATH,
+      telegramApiCaller: async (method, payload) => {
+        apiCalls.push({ method, payload });
+        return { ok: true, result: { message_id: 601 } };
+      }
+    });
+    await srv.start(0);
+
+    try {
+      const host = { id: 9301, first_name: 'TimeoutHost', username: 'thost' };
+      const joiner = { id: 9302, first_name: 'TimeoutGuest', username: 'tguest' };
+
+      // 1. Create inline room where nobody else joins before the timeout
+      const r1Res = await srv.roomManager.createRoom(host, {
+        maxPlayers: 4,
+        inline_message_id: 'inline_exp_1p'
+      });
+      const r1Id = r1Res.room.id;
+
+      // Wait for automatic expiration timer to fire
+      await new Promise(r => setTimeout(r, 130));
+
+      const r1Check = await srv.roomManager.getRoom(r1Id);
+      assert.strictEqual(r1Check.ok, false);
+      assert.strictEqual(r1Check.code, 'ROOM_EXPIRED', 'Unstarted 1P room marked expired automatically');
+
+      const edit1P = apiCalls.find(c => c.method === 'editMessageText' && c.payload.inline_message_id === 'inline_exp_1p' && c.payload.text.includes('⏳ <b>Game Expired</b>'));
+      assert(edit1P, 'Inline message edited to display ⏳ Game Expired');
+      assert(edit1P.payload.text.includes('Nobody joined before the lobby timeout'), '1P expired room explains nobody joined before timeout');
+      const kb1P = edit1P.payload.reply_markup.inline_keyboard;
+      assert.strictEqual(kb1P.length, 1);
+      assert.strictEqual(kb1P[0][0].text, '🔄 Play Again', 'Join button replaced with 🔄 Play Again');
+      assert.strictEqual(kb1P[0][0].switch_inline_query_current_chat, 'play', 'Play Again uses switch_inline_query_current_chat');
+
+      // Subsequent joins into the expired room must be rejected
+      const lateJoin = await srv.roomManager.joinRoom(r1Id, joiner, 'player');
+      assert.strictEqual(lateJoin.ok, false);
+      assert.strictEqual(lateJoin.code, 'ROOM_EXPIRED', 'Subsequent joins into expired room prevented');
+
+      // Idempotency: calling expireWaitingRoom again does not emit duplicate Telegram edits
+      const editCountBefore = apiCalls.filter(c => c.method === 'editMessageText' && c.payload.inline_message_id === 'inline_exp_1p').length;
+      const repeatExp = await srv.roomManager.expireWaitingRoom(r1Id);
+      assert.strictEqual(repeatExp.alreadyExpired, true, 'expireWaitingRoom is idempotent');
+      const editCountAfter = apiCalls.filter(c => c.method === 'editMessageText' && c.payload.inline_message_id === 'inline_exp_1p').length;
+      assert.strictEqual(editCountAfter, editCountBefore, 'No duplicate Telegram edits on repeated expiration');
+
+      // 2. Unstarted room where 2 players HAVE joined before timeout -> must NOT falsely claim nobody joined!
+      const r2Res = await srv.roomManager.createRoom(host, {
+        maxPlayers: 4,
+        inline_message_id: 'inline_exp_2p'
+      });
+      await srv.roomManager.joinRoom(r2Res.room.id, joiner, 'player');
+      await new Promise(r => setTimeout(r, 130));
+
+      const edit2P = apiCalls.filter(c => c.method === 'editMessageText' && c.payload.inline_message_id === 'inline_exp_2p').pop();
+      assert(edit2P && edit2P.payload.text.includes('⏳ <b>Game Expired</b>'));
+      assert(edit2P.payload.text.includes('(2/4 players had joined)'), 'Multi-player unstarted room accurately states 2/4 players had joined');
+      assert(!edit2P.payload.text.includes('Nobody joined'), 'Never falsely claims nobody joined when players joined');
+
+      // 3. Active started game MUST NEVER be expired by the waiting-room timeout!
+      const r3Res = await srv.roomManager.createRoom(host, { maxPlayers: 4, inline_message_id: 'inline_active_game' });
+      await srv.roomManager.joinRoom(r3Res.room.id, joiner, 'player');
+      const startRes = await srv.roomManager.startGame(r3Res.room.id, host.id);
+      assert.strictEqual(startRes.ok, true);
+
+      await new Promise(r => setTimeout(r, 130));
+      const activeCheck = await srv.roomManager.getRoom(r3Res.room.id);
+      assert.strictEqual(activeCheck.ok, true, 'Started game remains active after waiting-room timeout window');
+      assert.strictEqual(activeCheck.room.status, 'playing');
+    } finally {
+      await srv.stop();
+      cleanupFilePair(TEST_DB_PATH);
+    }
+  });
+
+  // Test 36: Play Again Opens Inline Mode in Same Chat & Creates Fresh Room ID Without Reviving Expired Room
+  await runTest('36. Play Again opens inline mode in same chat and creates a fresh room ID & lifecycle', async () => {
+    const apiCalls = [];
+    const srv = createUnoServer({
+      skipDotEnv: true,
+      isProduction: true,
+      nodeEnv: 'production',
+      port: 0,
+      botToken: TEST_BOT_TOKEN,
+      botUsername: 'custom_uno_bot',
+      appShortName: 'custom_app',
+      sessionSecret: TEST_SESSION_SECRET,
+      webhookSecret: TEST_WEBHOOK_SECRET,
+      webAppUrl: TEST_TRUSTED_ORIGIN,
+      allowedOrigins: [TEST_TRUSTED_ORIGIN],
+      allowDevAuth: false,
+      dbFilePath: TEST_DB_PATH,
+      telegramApiCaller: async (method, payload) => {
+        apiCalls.push({ method, payload });
+        return { ok: true, result: { message_id: 701 } };
+      }
+    });
+    await srv.start(0);
+
+    try {
+      const host = { id: 9401, first_name: 'PlayAgainHost', username: 'pahost' };
+
+      // 1. Initial inline query creates room 1
+      await srv.botController.handleUpdate({
+        inline_query: { id: 'iq_pa_1', from: host, query: '' }
+      });
+      const firstRoomId = apiCalls[0].payload.results[0].id;
+
+      // Mark room 1 expired
+      await srv.roomManager.expireWaitingRoom(firstRoomId);
+      const expiredCheck = await srv.roomManager.getRoom(firstRoomId);
+      assert.strictEqual(expiredCheck.code, 'ROOM_EXPIRED');
+
+      // 2. User presses 🔄 Play Again -> triggers inline_query with query="play" in the same chat
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({
+        inline_query: { id: 'iq_pa_2', from: host, query: 'play' }
+      });
+      const secondRoomId = apiCalls[0].payload.results[0].id;
+      assert.notStrictEqual(secondRoomId, firstRoomId, 'Play Again generates a brand-new room ID');
+
+      const newRoomCheck = await srv.roomManager.getRoom(secondRoomId);
+      assert.strictEqual(newRoomCheck.ok, true);
+      assert.strictEqual(newRoomCheck.room.status, 'waiting', 'New room has a fresh waiting lifecycle');
+
+      // Expired room remains expired and is never revived
+      const oldRoomStillExpired = await srv.roomManager.getRoom(firstRoomId);
+      assert.strictEqual(oldRoomStillExpired.code, 'ROOM_EXPIRED', 'Expired room is never revived');
+
+      // Verify configured botUsername and appShortName are used in generated deep links (never hardcoded)
+      const msgText = apiCalls[0].payload.results[0].input_message_content.message_text;
+      assert(msgText.includes('https://t.me/custom_uno_bot/custom_app?startapp='), 'Uses actual configured BOT_USERNAME and APP_SHORT_NAME');
+    } finally {
+      await srv.stop();
+      cleanupFilePair(TEST_DB_PATH);
+    }
+  });
+
+
+  // Test 37: Inline Publication/Expiration Race Conditions (Expiry Before Publication, Already-Expired Inline Result, Delayed chosen_inline_result & Post-Publish Timeout Anchoring)
+  await runTest('37. Inline publication/expiration race conditions: expiry before publication, choosing expired inline result, delayed chosen_inline_result & post-publication timeout anchoring', async () => {
+    const apiCalls = [];
+    const srv = createUnoServer({
+      skipDotEnv: true,
+      isProduction: true,
+      nodeEnv: 'production',
+      port: 0,
+      waitingRoomTimeoutMs: 100, // 100ms timeout for deterministic race testing
+      botToken: TEST_BOT_TOKEN,
+      botUsername: 'matcho_bot',
+      appShortName: 'play',
+      sessionSecret: TEST_SESSION_SECRET,
+      webhookSecret: TEST_WEBHOOK_SECRET,
+      webAppUrl: TEST_TRUSTED_ORIGIN,
+      allowedOrigins: [TEST_TRUSTED_ORIGIN],
+      allowDevAuth: false,
+      dbFilePath: TEST_DB_PATH,
+      telegramApiCaller: async (method, payload) => {
+        apiCalls.push({ method, payload });
+        return { ok: true, result: { message_id: 801 } };
+      }
+    });
+    await srv.start(0);
+
+    try {
+      const host = { id: 9501, first_name: 'RaceHost', username: 'rhost' };
+      const clicker = { id: 9502, first_name: 'RaceClicker', username: 'rclicker' };
+
+      // Scenario A: Room expires BEFORE publication -> user then chooses the already-expired inline result
+      // Verify the published message is immediately edited to "⏳ Game Expired" with "🔄 Play Again" (never left in stale waiting state!)
+      await srv.botController.handleUpdate({
+        inline_query: { id: 'iq_race_1', from: host, query: '' }
+      });
+      const draftRoomId = apiCalls[0].payload.results[0].id;
+
+      // Verify draft starts unpublished (is_published === false)
+      await srv.db.withTransaction(async (tx) => {
+        const draft = await tx.getRoom(draftRoomId);
+        assert.strictEqual(draft.is_published, false, 'Inline query room starts as unpublished draft');
+        assert.strictEqual(draft.published_at, null);
+      });
+
+      // Wait 140ms so the unpublished draft room expires before chosen_inline_result is sent
+      await new Promise(r => setTimeout(r, 140));
+      const checkExpiredDraft = await srv.roomManager.getRoom(draftRoomId);
+      assert.strictEqual(checkExpiredDraft.code, 'ROOM_EXPIRED', 'Unpublished draft expired after timeout');
+
+      // Now user selects the already-expired inline result in Telegram -> chosen_inline_result arrives with inline_message_id
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({
+        chosen_inline_result: {
+          result_id: draftRoomId,
+          from: host,
+          inline_message_id: 'inline_stale_chosen_1'
+        }
+      });
+
+      // Must immediately call editMessageText on inline_stale_chosen_1 to convert it to ⏳ Game Expired with 🔄 Play Again!
+      const immediateRecoveryEdit = apiCalls.find(
+        c => c.method === 'editMessageText' && c.payload.inline_message_id === 'inline_stale_chosen_1'
+      );
+      assert(immediateRecoveryEdit, 'Choosing an already-expired inline result immediately edits the published message');
+      assert(immediateRecoveryEdit.payload.text.includes('⏳ <b>Game Expired</b>'), 'Published message updated to ⏳ Game Expired');
+      assert(!immediateRecoveryEdit.payload.text.includes('Join the game below!'), 'Stale waiting prompt removed');
+      const recoveryKb = immediateRecoveryEdit.payload.reply_markup.inline_keyboard;
+      assert.strictEqual(recoveryKb.length, 1);
+      assert.strictEqual(recoveryKb[0][0].text, '🔄 Play Again', 'Obsolete join buttons replaced with 🔄 Play Again');
+      assert.strictEqual(recoveryKb[0][0].switch_inline_query_current_chat, 'play');
+
+      // Scenario B: Delayed chosen_inline_result (room published just before expiry, or chosen_inline_result arrives after manual expiry)
+      // First verify that when a valid unpublished draft is published at t=60ms (before the 100ms draft expiry),
+      // markRoomPublished anchors a FULL fresh 100ms waiting timeout from publication time!
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({
+        inline_query: { id: 'iq_race_2', from: host, query: '' }
+      });
+      const room2Id = apiCalls[0].payload.results[0].id;
+      assert.notStrictEqual(room2Id, draftRoomId, 'Next inline query after expired draft creates a brand-new room');
+
+      // Wait 60ms (more than half of the 100ms timeout), then publish via chosen_inline_result
+      await new Promise(r => setTimeout(r, 60));
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({
+        chosen_inline_result: {
+          result_id: room2Id,
+          from: host,
+          inline_message_id: 'inline_ anchored_2'
+        }
+      });
+
+      // At 60ms after publication (120ms after creation), room2 MUST STILL BE WAITING because publication anchored a fresh 100ms window!
+      await new Promise(r => setTimeout(r, 55));
+      const stillAliveAt55msAfterPub = await srv.roomManager.getRoom(room2Id);
+      assert.strictEqual(stillAliveAt55msAfterPub.ok, true, 'Published room gets full waiting timeout from publication time');
+      assert.strictEqual(stillAliveAt55msAfterPub.room.status, 'waiting');
+      assert.strictEqual(stillAliveAt55msAfterPub.room.is_published, true);
+
+      // Wait another 70ms (past the 100ms post-publication timeout) -> now room2 expires and updates inline_anchored_2 to ⏳ Game Expired!
+      await new Promise(r => setTimeout(r, 75));
+      const expiredAfterPubWindow = await srv.roomManager.getRoom(room2Id);
+      assert.strictEqual(expiredAfterPubWindow.code, 'ROOM_EXPIRED');
+      const postPubExpEdit = apiCalls.filter(
+        c => c.method === 'editMessageText' && c.payload.inline_message_id === 'inline_ anchored_2'
+      ).pop();
+      assert(postPubExpEdit && postPubExpEdit.payload.text.includes('⏳ <b>Game Expired</b>'), 'Published message updated to ⏳ Game Expired when post-publication timer fires');
+
+      // Scenario C: Delayed / missing chosen_inline_result where first callback_query arrives after room expired
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({
+        inline_query: { id: 'iq_race_3', from: host, query: 'play' }
+      });
+      const room3Id = apiCalls[0].payload.results[0].id;
+
+      // Expire room3 before any chosen_inline_result arrives
+      await srv.roomManager.expireWaitingRoom(room3Id);
+
+      // Now a user in the chat clicks "Join" on the stale message (callback_query carries inline_message_id)
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({
+        callback_query: {
+          id: 'cb_delayed_race_3',
+          from: clicker,
+          inline_message_id: 'inline_delayed_cb_3',
+          data: `join_${room3Id}`
+        }
+      });
+      const cbRecoveryEdit = apiCalls.find(
+        c => c.method === 'editMessageText' && c.payload.inline_message_id === 'inline_delayed_cb_3'
+      );
+      assert(cbRecoveryEdit, 'Callback on expired room without prior chosen_inline_result still edits the inline message');
+      assert(cbRecoveryEdit.payload.text.includes('⏳ <b>Game Expired</b>'));
+      assert.strictEqual(cbRecoveryEdit.payload.reply_markup.inline_keyboard[0][0].text, '🔄 Play Again');
+
+      // Scenario D: Repeated inline queries reuse unpublished draft, while Play Again retires the draft and creates a fresh room
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({ inline_query: { id: 'iq_rep_1', from: host, query: '' } });
+      await srv.botController.handleUpdate({ inline_query: { id: 'iq_rep_2', from: host, query: 'u' } });
+      const repId1 = apiCalls[0].payload.results[0].id;
+      const repId2 = apiCalls[1].payload.results[0].id;
+      assert.strictEqual(repId1, repId2, 'Repeated typing inline queries reuse the same unpublished draft room');
+
+      // Now trigger Play Again (query="play") -> must retire repId1 and create a genuinely fresh room!
+      apiCalls.length = 0;
+      await srv.botController.handleUpdate({ inline_query: { id: 'iq_rep_play_again', from: host, query: 'play' } });
+      const freshPlayAgainId = apiCalls[0].payload.results[0].id;
+      assert.notStrictEqual(freshPlayAgainId, repId1, 'Play Again creates a genuinely fresh room ID');
+
+      const oldDraftCheck = await srv.roomManager.getRoom(repId1);
+      assert.strictEqual(oldDraftCheck.code, 'ROOM_EXPIRED', 'Previous unpublished draft was retired cleanly when Play Again created a fresh room');
+    } finally {
+      await srv.stop();
+      cleanupFilePair(TEST_DB_PATH);
+    }
+  });
+
   console.log('======================================================================');
-  console.log(` Results: ${passed} / 28 passed, ${failed} failed`);
+  console.log(` Results: ${passed} / 37 passed, ${failed} failed`);
   console.log('======================================================================');
   if (failed > 0) process.exit(1);
 }

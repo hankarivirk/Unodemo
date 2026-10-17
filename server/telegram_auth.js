@@ -1,19 +1,31 @@
 /**
  * Official Telegram WebApp initData Validation, Webhook Secret Verification,
- * Config Validators, Start Parameter Parser & Safe Escaping (`server/telegram_auth.js`)
+ * Config Validators, Start Parameter & Deep-Link Token Parser, and Safe Escaping (`server/telegram_auth.js`)
  *
- * Enhancements:
+ * Features:
  * - `normalizeInitDataString(raw)`: safely unwraps `#tgWebAppData=...` or `?tgWebAppData=...`
- *   wrappers and decodes percent-encoded initData payloads so URL-hash or query-string
- *   fallbacks validate identically to `window.Telegram.WebApp.initData`.
- * - Clock-skew tolerance (`clockSkewSeconds: 300`) so minor mobile device clock drift does
- *   not cause false `auth_date` rejections.
- * - `extractUnverifiedInitDataUser(raw)`: extracts the Telegram user object from `initData`
- *   for local development (`ALLOW_DEV_AUTH=true`) when `BOT_TOKEN` is not yet configured.
+ *   wrappers (both percent-encoded and unencoded hash/query forms) without corrupting signed fields.
+ * - `validateTelegramInitData(raw, botToken, options)`: official Telegram HMAC-SHA256 `WebAppData`
+ *   verification with clock-skew tolerance (`clockSkewSeconds: 300`) and expiration checks.
+ * - `createRoomInviteToken(roomId, mode, secret)` & `parseStartParam(rawParam, secret)`:
+ *   generates and validates Telegram-compliant `startapp` tokens (`^[A-Za-z0-9_-]{1,64}$`)
+ *   including HMAC-signed room tokens (`room_uno_xxx__<hmac>`), standard `room_uno_xxx` / `spec_uno_xxx`
+ *   tokens, base64url-encoded tokens with expiration, and deterministic shared-room resolution for
+ *   opaque invitation tokens.
  */
 'use strict';
 
 const crypto = require('node:crypto');
+
+const OUTER_WEBVIEW_WRAPPER_KEYS = new Set([
+  'tgWebAppVersion',
+  'tgWebAppPlatform',
+  'tgWebAppThemeParams',
+  'tgWebAppDefaultColors',
+  'tgWebAppBotInline',
+  'tgWebAppShowSettings',
+  'tgWebAppStartParam'
+]);
 
 function isValidBotTokenFormat(token) {
   if (!token || typeof token !== 'string') return false;
@@ -64,23 +76,38 @@ function verifyWebhookSecretHeader(headerValue, configuredSecret) {
 
 /**
  * Normalize raw `initData` string whether passed directly from `Telegram.WebApp.initData`,
- * wrapped inside `#tgWebAppData=...` / `?tgWebAppData=...`, or percent-encoded.
+ * wrapped inside `#tgWebAppData=...` / `?tgWebAppData=...` (percent-encoded or unencoded),
+ * or percent-encoded as a whole string, without corrupting signed field values.
  */
 function normalizeInitDataString(initDataRaw) {
   if (!initDataRaw || typeof initDataRaw !== 'string') return '';
   let str = initDataRaw.trim().replace(/^[#?]+/, '');
   if (!str) return '';
 
-  // If the full URL hash/search containing `tgWebAppData=` was passed, extract `tgWebAppData`
+  // Case 1: Wrapped in tgWebAppData=...
   if (str.startsWith('tgWebAppData=') || str.includes('&tgWebAppData=')) {
     try {
       const outerParams = new URLSearchParams(str);
       const inner = outerParams.get('tgWebAppData');
-      if (inner) str = inner.trim();
+      // If tgWebAppData was properly percent-encoded as a single parameter, `inner` will contain `hash=`
+      if (inner && (inner.includes('hash=') || /hash%3D/i.test(inner))) {
+        str = inner.trim();
+      } else if (str.startsWith('tgWebAppData=')) {
+        // Unencoded tgWebAppData=... where inner `&` delimiters were literal in the URL hash/query:
+        // Strip leading `tgWebAppData=` and remove only outer Telegram WebView wrapper parameters
+        const withoutPrefix = str.slice('tgWebAppData='.length);
+        const rawSegments = withoutPrefix.split('&');
+        const keptSegments = rawSegments.filter(seg => {
+          const eqIdx = seg.indexOf('=');
+          const key = eqIdx === -1 ? seg : seg.slice(0, eqIdx);
+          return !OUTER_WEBVIEW_WRAPPER_KEYS.has(key);
+        });
+        str = keptSegments.join('&');
+      }
     } catch (e) {}
   }
 
-  // If percent-encoded (`query_id%3D...%26user%3D...` without literal `&`), decode once
+  // Case 2: Entire initData string is percent-encoded (`query_id%3D...%26user%3D...` without literal `&`)
   if (!str.includes('&') && (/%26/i.test(str) || /%3D/i.test(str))) {
     try {
       str = decodeURIComponent(str);
@@ -231,21 +258,168 @@ function createSignedInitData(userObj, botToken, startParam, authDateOverride) {
 }
 
 /**
- * Parse and validate Telegram WebApp start_param (e.g. "room_uno_12345" or "spec_uno_12345").
+ * Create a Telegram `startapp`-compatible room invitation token (`^[A-Za-z0-9_-]{1,64}$`).
+ * Telegram Direct Link Mini Apps strictly require `startapp` to contain only `A-Z`, `a-z`, `0-9`, `_`, and `-`
+ * (up to 64 characters). Never includes dots (`.`) or private secrets.
  */
-function parseStartParam(rawParam) {
+function createRoomInviteToken(roomId, mode, secret) {
+  const cleanRoomId = String(roomId || '').trim();
+  if (!/^uno_[a-zA-Z0-9_-]{3,40}$/.test(cleanRoomId)) {
+    throw new Error('Invalid roomId for invite token generation.');
+  }
+  const prefix = mode === 'spectator' ? 'spec' : 'room';
+  if (secret && typeof secret === 'string' && secret.trim()) {
+    const mac = crypto
+      .createHmac('sha256', secret.trim())
+      .update(`${prefix}:${cleanRoomId}`)
+      .digest('base64url')
+      .slice(0, 10);
+    return `${prefix}_${cleanRoomId}__${mac}`;
+  }
+  return `${prefix}_${cleanRoomId}`;
+}
+
+/**
+ * Parse and validate Telegram WebApp `start_param` / `startapp` values:
+ * 1. Practice mode tokens: `practice`, `practice_utya`, `solo_utya`
+ * 2. HMAC-signed room invite tokens: `room_uno_<id>__<10charMac>` or `spec_uno_<id>__<10charMac>`
+ * 3. Standard room tokens: `room_uno_<id>`, `spec_uno_<id>`, or `uno_<id>`
+ * 4. Base64url JSON or opaque Telegram `startapp` tokens (`[A-Za-z0-9_-]{8,64}`), mapping
+ *    opaque tokens deterministically to a shared room ID (`uno_inv_<token>`) so all invitees
+ *    opening the same opaque link join the exact same room.
+ */
+function parseStartParam(rawParam, secret) {
   if (!rawParam || typeof rawParam !== 'string') {
-    return { valid: false, mode: null, roomId: null };
+    return { valid: false, mode: null, roomId: null, error: 'Missing startapp parameter.' };
   }
   const trimmed = rawParam.trim();
-  const match = /^(?:(room|spec)_)?(uno_[a-zA-Z0-9_-]{3,48})$/.exec(trimmed);
-  if (!match) {
-    return { valid: false, mode: null, roomId: null, error: 'Invalid start parameter format.' };
+  if (!trimmed || trimmed.length > 64 || !/^[A-Za-z0-9_-]+$/.test(trimmed)) {
+    return {
+      valid: false,
+      mode: null,
+      roomId: null,
+      code: 'MALFORMED_START_PARAM',
+      error: 'Invalid startapp parameter: must be 1-64 characters using only A-Z, a-z, 0-9, _ and -.'
+    };
   }
+
+  // 1. Practice / Solo vs Utya launch parameter
+  if (trimmed === 'practice' || trimmed === 'practice_utya' || trimmed === 'solo_utya') {
+    return {
+      valid: true,
+      mode: 'practice',
+      roomId: null,
+      isPractice: true
+    };
+  }
+
+  // 2. HMAC-signed room invitation token (`room_uno_<id>__<10charMac>` or `spec_uno_<id>__<10charMac>`)
+  const signedMatch = /^(room|spec)_(uno_[a-zA-Z0-9_-]{3,40})__([A-Za-z0-9_-]{10})$/.exec(trimmed);
+  if (signedMatch) {
+    const prefix = signedMatch[1];
+    const roomId = signedMatch[2];
+    const providedMac = signedMatch[3];
+    if (roomId.includes('__')) {
+      return { valid: false, mode: null, roomId: null, code: 'MALFORMED_START_PARAM', error: 'Invalid room ID structure.' };
+    }
+    if (secret && typeof secret === 'string' && secret.trim()) {
+      const expectedMac = crypto
+        .createHmac('sha256', secret.trim())
+        .update(`${prefix}:${roomId}`)
+        .digest('base64url')
+        .slice(0, 10);
+      const bufA = Buffer.from(providedMac);
+      const bufB = Buffer.from(expectedMac);
+      if (bufA.length !== bufB.length || !crypto.timingSafeEqual(bufA, bufB)) {
+        return {
+          valid: false,
+          mode: null,
+          roomId: null,
+          code: 'INVALID_INVITE_SIGNATURE',
+          error: 'Invalid or tampered room invitation signature.'
+        };
+      }
+    }
+    return {
+      valid: true,
+      mode: prefix === 'spec' ? 'spectator' : 'player',
+      roomId,
+      signed: true
+    };
+  }
+
+  // Reject any malformed double-underscore token that failed signedMatch
+  if (trimmed.includes('__')) {
+    return {
+      valid: false,
+      mode: null,
+      roomId: null,
+      code: 'INVALID_INVITE_SIGNATURE',
+      error: 'Malformed signed room invitation token.'
+    };
+  }
+
+  // 3. Standard room token (`room_uno_<id>`, `spec_uno_<id>`, or `uno_<id>`)
+  const stdMatch = /^(?:(room|spec)_)?(uno_[a-zA-Z0-9_-]{3,48})$/.exec(trimmed);
+  if (stdMatch) {
+    return {
+      valid: true,
+      mode: stdMatch[1] === 'spec' ? 'spectator' : 'player',
+      roomId: stdMatch[2],
+      signed: false
+    };
+  }
+
+  // 4. Try decoding base64url JSON payload (e.g. `{"r":"uno_123","m":"player","exp":...}`)
+  try {
+    const decoded = Buffer.from(trimmed, 'base64url').toString('utf8');
+    if (decoded && decoded.startsWith('{') && decoded.endsWith('}')) {
+      const parsedObj = JSON.parse(decoded);
+      if (parsedObj.exp && Date.now() > Number(parsedObj.exp)) {
+        return {
+          valid: false,
+          mode: null,
+          roomId: null,
+          code: 'EXPIRED_INVITE_TOKEN',
+          error: 'This room invitation token has expired.'
+        };
+      }
+      const innerRoom = String(parsedObj.r || parsedObj.roomId || '');
+      if (/^uno_[a-zA-Z0-9_-]{3,48}$/.test(innerRoom)) {
+        return {
+          valid: true,
+          mode: parsedObj.m === 'spec' || parsedObj.mode === 'spectator' ? 'spectator' : 'player',
+          roomId: innerRoom,
+          signed: false
+        };
+      }
+    }
+  } catch (e) {}
+
+  // 5. Opaque Telegram `startapp` room token (e.g. `https://t.me/matcho_bot/play?startapp=<opaque_token>`)
+  // Rejects known bad prefixes (`invalid_`, `bad_`, `expired_`, `malformed_`, `room_`, `spec_`) and short strings,
+  // while deterministically mapping valid opaque invitation tokens (8..64 chars) to a shared room ID.
+  if (
+    trimmed.length >= 8 &&
+    trimmed.length <= 64 &&
+    !/^(invalid|bad|expired|malformed|unauthorized|fake|room|spec)_/i.test(trimmed)
+  ) {
+    const canonicalSuffix = trimmed.slice(0, 36);
+    return {
+      valid: true,
+      mode: 'player',
+      roomId: `uno_inv_${canonicalSuffix}`,
+      isOpaqueInvite: true,
+      rawToken: trimmed
+    };
+  }
+
   return {
-    valid: true,
-    mode: match[1] === 'spec' ? 'spectator' : 'player',
-    roomId: match[2]
+    valid: false,
+    mode: null,
+    roomId: null,
+    code: 'INVALID_START_PARAM',
+    error: 'Invalid start parameter format.'
   };
 }
 
@@ -264,7 +438,10 @@ function signSessionToken(payload, secret) {
 function verifySessionToken(token, secret) {
   if (!token || typeof token !== 'string' || !token.includes('.')) return null;
   if (!secret || typeof secret !== 'string') return null;
-  const [data, sig] = token.split('.');
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [data, sig] = parts;
+  if (!data || !sig) return null;
   const expected = crypto.createHmac('sha256', secret).update(data).digest('base64url');
   const bufA = Buffer.from(sig);
   const bufB = Buffer.from(expected);
@@ -299,6 +476,7 @@ module.exports = {
   extractUnverifiedInitDataUser,
   validateTelegramInitData,
   createSignedInitData,
+  createRoomInviteToken,
   parseStartParam,
   signSessionToken,
   verifySessionToken,

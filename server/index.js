@@ -7,11 +7,15 @@
  * - Strict production startup validation (`validateServerConfig`): fails fast if `SESSION_SECRET` (<32 chars),
  *   `BOT_TOKEN` (missing/placeholder/invalid format), `TELEGRAM_WEBHOOK_SECRET` / `WEBHOOK_SECRET` (<16 chars),
  *   or `PUBLIC_APP_URL` / `WEBAPP_URL` / `ALLOWED_ORIGINS` is missing in production
+ * - Authoritative `initData` & `launchToken` security in `authenticateRequestUser`:
+ *   - Live signed `initData` takes priority for user identity, preventing stale `sessionToken` account-switch bugs
+ *   - Room-scoped `launchToken` ALWAYS enforces room binding (`LAUNCH_TOKEN_ROOM_MISMATCH`) against direct `roomId`,
+ *     URL path `:roomId`, and resolved `startParam` rooms, and can NEVER be bypassed by a cached `sessionToken`
  * - Constant-time verification of `X-Telegram-Bot-Api-Secret-Token` on `/api/bot/webhook`
  * - WebSocket upgrade `Origin` validation against configured trusted origins in production
  * - Per-IP HTTP rate limiting & WebSocket token-bucket rate limiting
  * - Built-in `/terms` Terms of Use page for Telegram Mini App `@BotFather` integration
- * - Clean graceful shutdown (`stop()`) closing WebSocket, HTTP, Redis, and primary DB connections
+ * - Clean graceful shutdown (`stop()`) closing WebSocket, HTTP, Redis, timers, and primary DB connections
  */
 'use strict';
 
@@ -21,7 +25,7 @@ const path = require('node:path');
 
 const { loadDotEnv } = require('./env_loader');
 const { PersistentDatabase, selectDatabaseProvider, redactDatabaseUri } = require('./db');
-const { RoomManager } = require('./room_manager');
+const { RoomManager, DEFAULT_WAITING_ROOM_TIMEOUT_MS } = require('./room_manager');
 const { NativeWebSocketServer } = require('./ws_server');
 const {
   isValidBotTokenFormat,
@@ -148,11 +152,15 @@ function createUnoServer(options) {
     ? Boolean(rawOpts.isProduction)
     : (nodeEnv === 'production');
 
+  const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? (`https://${String(process.env.RAILWAY_PUBLIC_DOMAIN).replace(/^https?:\/\//, '')}`)
+    : '';
+
   const webAppUrl = rawOpts.webAppUrl !== undefined
     ? rawOpts.webAppUrl
     : (rawOpts.publicAppUrl !== undefined
         ? rawOpts.publicAppUrl
-        : (process.env.PUBLIC_APP_URL || process.env.WEBAPP_URL || (isProduction ? '' : 'http://localhost:3000')));
+        : (process.env.PUBLIC_APP_URL || process.env.WEBAPP_URL || railwayDomain || (isProduction ? '' : 'http://localhost:3000')));
 
   const allowedOriginsInput = rawOpts.allowedOrigins !== undefined
     ? rawOpts.allowedOrigins
@@ -166,7 +174,15 @@ function createUnoServer(options) {
 
   const botToken = rawOpts.botToken !== undefined
     ? rawOpts.botToken
-    : (process.env.BOT_TOKEN || '');
+    : (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '');
+
+  const botUsername = String(
+    rawOpts.botUsername || process.env.BOT_USERNAME || process.env.TELEGRAM_BOT_USERNAME || 'matcho_bot'
+  ).replace(/^@/, '').trim() || 'matcho_bot';
+
+  const appShortName = String(
+    rawOpts.appShortName || process.env.APP_SHORT_NAME || process.env.TELEGRAM_APP_SHORT_NAME || 'play'
+  ).replace(/[^A-Za-z0-9_-]/g, '').trim() || 'play';
 
   const webhookSecret = rawOpts.webhookSecret !== undefined
     ? rawOpts.webhookSecret
@@ -218,11 +234,19 @@ function createUnoServer(options) {
         ? process.env.DB_AUTO_FALLBACK === 'true'
         : !isProduction);
 
+  const waitingRoomTimeoutMs = Number(
+    rawOpts.waitingRoomTimeoutMs !== undefined
+      ? rawOpts.waitingRoomTimeoutMs
+      : (process.env.WAITING_ROOM_TIMEOUT_MS || DEFAULT_WAITING_ROOM_TIMEOUT_MS)
+  );
+
   const opts = {
     nodeEnv,
     isProduction,
     port: Number(rawOpts.port !== undefined ? rawOpts.port : (process.env.PORT || 3000)),
     botToken,
+    botUsername,
+    appShortName,
     sessionSecret,
     webhookSecret,
     webAppUrl,
@@ -238,6 +262,7 @@ function createUnoServer(options) {
     redisUrl,
     dbConnectionTimeoutMs,
     dbAutoFallback,
+    waitingRoomTimeoutMs,
     pgPool: rawOpts.pgPool || null,
     pgModule: rawOpts.pgModule || null,
     mongoClient: rawOpts.mongoClient || null,
@@ -277,19 +302,42 @@ function createUnoServer(options) {
   let botController = null;
 
   const roomManager = new RoomManager(db, {
+    waitingRoomTimeoutMs: opts.waitingRoomTimeoutMs,
     officialOpeningEffects: opts.officialOpeningEffects,
     enableWild4Challenge: opts.enableWild4Challenge,
+    sessionSecret: opts.sessionSecret,
+    botUsername: opts.botUsername,
+    appShortName: opts.appShortName,
     onRoomUpdated: (room) => {
       if (botController) {
         botController.syncRoomTelegramMessage(room).catch(() => {});
+      }
+    },
+    onRoomExpired: (room) => {
+      if (!room) return;
+      const subs = roomSubscriptions.get(room.id);
+      if (subs) {
+        for (const sub of subs) {
+          if (sub.ws && sub.ws.readyState === 1) {
+            sub.ws.sendJSON({
+              type: 'ERROR',
+              code: 'ROOM_EXPIRED',
+              error: 'This lobby expired before the game started.',
+              roomId: room.id,
+              room: roomManager.formatPublicRoomState(room, sub.user ? sub.user.id : null)
+            });
+          }
+          if (sub.ws) sub.ws._roomId = null;
+        }
+        roomSubscriptions.delete(room.id);
       }
     }
   });
 
   botController = new TelegramBotController(roomManager, {
     botToken: opts.botToken,
-    botUsername: process.env.BOT_USERNAME || 'matcho_bot',
-    appShortName: process.env.APP_SHORT_NAME || 'play',
+    botUsername: opts.botUsername,
+    appShortName: opts.appShortName,
     webAppUrl: opts.webAppUrl || `http://localhost:${opts.port}`,
     sessionSecret: opts.sessionSecret,
     apiCaller: opts.telegramApiCaller,
@@ -372,42 +420,265 @@ function createUnoServer(options) {
     };
   }
 
-  function authenticateRequestUser(body, headers) {
-    const authHeader = (headers && headers.authorization) || '';
-    const tokenCandidate = authHeader.startsWith('Bearer ')
-      ? authHeader.slice(7).trim()
-      : ((body && (body.sessionToken || body.launchToken)) || '');
-    if (tokenCandidate) {
-      const verified = verifySessionToken(tokenCandidate, opts.sessionSecret);
-      if (verified && verified.user) {
-        return { ok: true, user: verified.user, startParam: verified.startParam || null };
+  /**
+   * Enforce room-binding constraints whenever a room-scoped launchToken (or room-bound sessionToken)
+   * or a room-specific `startParam` is supplied.
+   */
+  function validateTargetRoomAuthorization(boundRoomId, bodyObj, initDataStartParam, explicitTargetRoomId) {
+    const bodyRoomId = (bodyObj && bodyObj.roomId !== undefined && bodyObj.roomId !== null)
+      ? String(bodyObj.roomId).trim()
+      : null;
+    const bodyStartRaw = (bodyObj && bodyObj.startParam !== undefined && bodyObj.startParam !== null)
+      ? String(bodyObj.startParam).trim()
+      : '';
+    const initStartRaw = initDataStartParam ? String(initDataStartParam).trim() : '';
+
+    let parsedBodyStart = null;
+    if (bodyStartRaw) {
+      parsedBodyStart = parseStartParam(bodyStartRaw, opts.sessionSecret);
+      if (!parsedBodyStart.valid) {
+        return {
+          ok: false,
+          code: parsedBodyStart.code || 'INVALID_START_PARAM',
+          error: parsedBodyStart.error || 'Invalid room startParam.'
+        };
       }
     }
 
+    let parsedInitStart = null;
+    if (initStartRaw) {
+      parsedInitStart = parseStartParam(initStartRaw, opts.sessionSecret);
+      if (!parsedInitStart.valid) {
+        return {
+          ok: false,
+          code: parsedInitStart.code || 'INVALID_START_PARAM',
+          error: parsedInitStart.error || 'Invalid initData start_param.'
+        };
+      }
+    }
+
+    // Even without a launchToken, an invite link for Room A (`startParam`) must never be combined with a different `roomId` (Room B)
+    const startParamRoomId = (parsedBodyStart && parsedBodyStart.roomId) || (parsedInitStart && parsedInitStart.roomId) || null;
+    if (startParamRoomId) {
+      if (explicitTargetRoomId && String(explicitTargetRoomId) !== String(startParamRoomId)) {
+        return {
+          ok: false,
+          code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+          error: 'Room invite parameter does not match the requested target room.'
+        };
+      }
+      if (bodyRoomId && String(bodyRoomId) !== String(startParamRoomId)) {
+        return {
+          ok: false,
+          code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+          error: 'Room invite parameter does not match the requested roomId.'
+        };
+      }
+    }
+    if (parsedBodyStart && parsedInitStart && parsedBodyStart.roomId && parsedInitStart.roomId) {
+      if (String(parsedBodyStart.roomId) !== String(parsedInitStart.roomId)) {
+        return {
+          ok: false,
+          code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+          error: 'Conflicting room identifiers in startParam and initData.'
+        };
+      }
+    }
+
+    // If a room-scoped launchToken (or room-bound sessionToken) is present, strictly enforce `boundRoomId`
+    if (boundRoomId) {
+      const expectedRoom = String(boundRoomId);
+
+      if (explicitTargetRoomId !== undefined && explicitTargetRoomId !== null) {
+        if (!explicitTargetRoomId || String(explicitTargetRoomId) !== expectedRoom) {
+          return {
+            ok: false,
+            code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+            error: 'Launch token is bound to a different room.'
+          };
+        }
+      }
+
+      if (bodyRoomId !== null) {
+        if (!bodyRoomId || bodyRoomId !== expectedRoom) {
+          return {
+            ok: false,
+            code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+            error: 'Launch token is bound to a different room.'
+          };
+        }
+      }
+
+      if (parsedBodyStart) {
+        if (parsedBodyStart.isPractice || !parsedBodyStart.roomId || String(parsedBodyStart.roomId) !== expectedRoom) {
+          return {
+            ok: false,
+            code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+            error: 'Launch token is bound to a different room than startParam.'
+          };
+        }
+      }
+
+      if (parsedInitStart) {
+        if (parsedInitStart.isPractice || !parsedInitStart.roomId || String(parsedInitStart.roomId) !== expectedRoom) {
+          return {
+            ok: false,
+            code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+            error: 'Launch token is bound to a different room than initData start_param.'
+          };
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      resolvedRoomId: explicitTargetRoomId || bodyRoomId || startParamRoomId || boundRoomId || null,
+      parsedStart: parsedBodyStart || parsedInitStart || null
+    };
+  }
+
+  /**
+   * Authenticate HTTP/WebSocket request user with strict launch-token room binding:
+   * 1. If `launchToken` is provided, ALWAYS verify it first. A malformed or expired `launchToken`
+   *    fails closed immediately (`UNAUTHORIZED`), and a valid `launchToken`'s `roomId` claim
+   *    is enforced even when `sessionToken` or `initData` is also present in the request.
+   * 2. Live signed `initData` (`body.initData` or `X-Telegram-Init-Data` header) takes priority
+   *    for user identity when present, preventing stale `sessionToken` identity mismatches.
+   * 3. When `initData` is absent, `launchToken` takes precedence over `sessionToken` so a cached
+   *    `sessionToken` can never silently authorize a different room than the `launchToken` permits.
+   * 4. Only in non-production development mode (`allowDevAuth: true`), allows `devUser` fallback.
+   */
+  function authenticateRequestUser(body, headers, explicitTargetRoomId) {
     const rawInitData = (body && body.initData) || (headers && headers['x-telegram-init-data']) || '';
-    if (rawInitData) {
+    const authHeader = (headers && headers.authorization) || '';
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const sessionTokenCandidate = bearerToken || (body && body.sessionToken) || '';
+    const launchTokenCandidate = (body && body.launchToken) || (headers && headers['x-telegram-launch-token']) || '';
+
+    // Step 1: Always verify launchToken whenever supplied so a cached sessionToken cannot mask or bypass it
+    let verifiedLaunch = null;
+    if (launchTokenCandidate && String(launchTokenCandidate).trim()) {
+      verifiedLaunch = verifySessionToken(String(launchTokenCandidate).trim(), opts.sessionSecret);
+      if (!verifiedLaunch || !verifiedLaunch.user || !verifiedLaunch.user.id || verifiedLaunch.kind !== 'launch') {
+        return {
+          ok: false,
+          code: 'UNAUTHORIZED',
+          error: 'Launch token is invalid, malformed, or expired.'
+        };
+      }
+    }
+
+    const launchBoundRoomId = (verifiedLaunch && verifiedLaunch.roomId) ? String(verifiedLaunch.roomId) : null;
+
+    // Step 2: Validate live Telegram initData first whenever provided
+    if (rawInitData && String(rawInitData).trim()) {
       const check = validateTelegramInitData(rawInitData, opts.botToken);
       if (check.valid) {
-        return { ok: true, user: check.user, startParam: check.start_param || null };
+        if (verifiedLaunch && String(verifiedLaunch.user.id) !== String(check.user.id)) {
+          return {
+            ok: false,
+            code: 'UNAUTHORIZED',
+            error: 'Launch token user does not match Telegram initData user.'
+          };
+        }
+        const roomCheck = validateTargetRoomAuthorization(
+          launchBoundRoomId,
+          body,
+          check.start_param || null,
+          explicitTargetRoomId
+        );
+        if (!roomCheck.ok) return roomCheck;
+
+        return {
+          ok: true,
+          user: check.user,
+          startParam: check.start_param || (verifiedLaunch && verifiedLaunch.startParam) || null,
+          boundRoomId: launchBoundRoomId,
+          authMethod: 'initData'
+        };
       }
       // In local development mode (`allowDevAuth: true`) when BOT_TOKEN is not yet configured,
-      // allow extracting the unverified user from initData or falling back to devUser instead of blocking.
+      // allow extracting the unverified user from initData instead of blocking.
       if (opts.allowDevAuth && !isValidBotTokenFormat(opts.botToken)) {
         const unverified = extractUnverifiedInitDataUser(rawInitData);
         if (unverified && unverified.user) {
+          const roomCheck = validateTargetRoomAuthorization(
+            launchBoundRoomId,
+            body,
+            unverified.start_param || null,
+            explicitTargetRoomId
+          );
+          if (!roomCheck.ok) return roomCheck;
+
           return {
             ok: true,
             user: unverified.user,
             startParam: unverified.start_param || (body && body.startParam) || null,
-            isDev: true
+            boundRoomId: launchBoundRoomId,
+            isDev: true,
+            authMethod: 'dev_initData'
           };
         }
       } else {
+        // Explicit invalid/tampered/expired initData must fail closed and NEVER fall back to a stale sessionToken
         return { ok: false, code: 'INVALID_INIT_DATA', error: check.error };
       }
     }
 
+    // Step 3: If a valid launchToken is present (with or without a cached sessionToken), launchToken takes precedence
+    if (verifiedLaunch) {
+      const roomCheck = validateTargetRoomAuthorization(
+        launchBoundRoomId,
+        body,
+        verifiedLaunch.startParam || null,
+        explicitTargetRoomId
+      );
+      if (!roomCheck.ok) return roomCheck;
+
+      return {
+        ok: true,
+        user: verifiedLaunch.user,
+        startParam: verifiedLaunch.startParam || null,
+        boundRoomId: launchBoundRoomId,
+        authMethod: 'launchToken'
+      };
+    }
+
+    // Step 4: Verify sessionToken when neither initData nor launchToken is present
+    if (sessionTokenCandidate && String(sessionTokenCandidate).trim()) {
+      const verifiedSession = verifySessionToken(String(sessionTokenCandidate).trim(), opts.sessionSecret);
+      if (verifiedSession && verifiedSession.user && verifiedSession.user.id) {
+        const sessionBoundRoomId = verifiedSession.roomId || verifiedSession.boundRoomId || null;
+        const roomCheck = validateTargetRoomAuthorization(
+          sessionBoundRoomId,
+          body,
+          null,
+          explicitTargetRoomId
+        );
+        if (!roomCheck.ok) return roomCheck;
+
+        return {
+          ok: true,
+          user: verifiedSession.user,
+          startParam: verifiedSession.startParam || null,
+          boundRoomId: sessionBoundRoomId,
+          authMethod: verifiedSession.kind === 'launch' ? 'launchToken' : 'sessionToken'
+        };
+      }
+      if (!opts.allowDevAuth) {
+        return {
+          ok: false,
+          code: 'UNAUTHORIZED',
+          error: 'Session token has expired or is invalid. Please relaunch from Telegram.'
+        };
+      }
+    }
+
+    // Step 5: Development-only fallback (`allowDevAuth` is strictly forbidden in production)
     if (opts.allowDevAuth && body && body.devUser && body.devUser.id) {
+      const roomCheck = validateTargetRoomAuthorization(null, body, null, explicitTargetRoomId);
+      if (!roomCheck.ok) return roomCheck;
+
       return {
         ok: true,
         user: {
@@ -416,7 +687,9 @@ function createUnoServer(options) {
           username: String(body.devUser.username || '').slice(0, 48)
         },
         startParam: body.startParam || null,
-        isDev: true
+        boundRoomId: null,
+        isDev: true,
+        authMethod: 'devUser'
       };
     }
 
@@ -472,9 +745,11 @@ function createUnoServer(options) {
       const pathname = parsedUrl.pathname;
 
       if (req.method === 'GET' && pathname === '/api/health') {
-        return sendJson(res, 200, {
-          ok: true,
-          status: 'healthy',
+        const dbHealthy = Boolean(db && db.mode && db.mode !== 'uninitialized');
+        const statusCode = dbHealthy ? 200 : 503;
+        return sendJson(res, statusCode, {
+          ok: dbHealthy,
+          status: dbHealthy ? 'healthy' : 'unhealthy',
           nodeEnv: opts.nodeEnv,
           isProduction: opts.isProduction,
           dbMode: db.mode,
@@ -504,15 +779,27 @@ function createUnoServer(options) {
         const body = await readJsonBody(req);
         const auth = authenticateRequestUser(body, req.headers);
         if (!auth.ok) {
-          return sendJson(res, 401, { ok: false, code: auth.code, error: auth.error });
+          const errStatus = auth.code === 'LAUNCH_TOKEN_ROOM_MISMATCH' ? 403 : 401;
+          return sendJson(res, errStatus, { ok: false, code: auth.code, error: auth.error });
         }
 
         const rawStart = body.startParam || auth.startParam || '';
-        const parsedStart = rawStart ? parseStartParam(rawStart) : { valid: false, mode: null, roomId: null };
+        const parsedStart = rawStart
+          ? parseStartParam(rawStart, opts.sessionSecret)
+          : { valid: false, mode: null, roomId: null };
+
+        if (auth.boundRoomId && parsedStart.valid && parsedStart.roomId && String(parsedStart.roomId) !== String(auth.boundRoomId)) {
+          return sendJson(res, 403, {
+            ok: false,
+            code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+            error: 'Launch token is bound to a different room.'
+          });
+        }
 
         const sessionToken = signSessionToken({
           user: auth.user,
           startParam: rawStart || null,
+          boundRoomId: auth.boundRoomId || null,
           exp: Date.now() + 24 * 3600 * 1000
         }, opts.sessionSecret);
 
@@ -520,7 +807,9 @@ function createUnoServer(options) {
           ok: true,
           user: auth.user,
           sessionToken,
-          startParam: parsedStart
+          startParam: parsedStart,
+          botUsername: botController.botUsername,
+          appShortName: botController.appShortName
         });
       }
 
@@ -528,10 +817,21 @@ function createUnoServer(options) {
         const body = await readJsonBody(req);
         const auth = authenticateRequestUser(body, req.headers);
         if (!auth.ok) {
-          return sendJson(res, 401, { ok: false, code: auth.code, error: auth.error });
+          const errStatus = auth.code === 'LAUNCH_TOKEN_ROOM_MISMATCH' ? 403 : 401;
+          return sendJson(res, errStatus, { ok: false, code: auth.code, error: auth.error });
+        }
+        if (auth.boundRoomId && (!body.roomId || String(body.roomId) !== String(auth.boundRoomId))) {
+          return sendJson(res, 403, {
+            ok: false,
+            code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+            error: 'Room-scoped launch token cannot create a different room.'
+          });
         }
 
-        const created = await roomManager.createRoom(auth.user, { roomId: body.roomId });
+        const created = await roomManager.createRoom(auth.user, {
+          roomId: body.roomId,
+          maxPlayers: body.maxPlayers === 2 ? 2 : 4
+        });
         return sendJson(res, 201, {
           ok: true,
           room: roomManager.formatPublicRoomState(created.room, auth.user.id)
@@ -546,7 +846,7 @@ function createUnoServer(options) {
           const status = roomRes.code === 'ROOM_EXPIRED' ? 410 : 404;
           return sendJson(res, status, roomRes);
         }
-        const auth = authenticateRequestUser({}, req.headers);
+        const auth = authenticateRequestUser({}, req.headers, roomId);
         const viewerId = auth.ok ? auth.user.id : null;
         return sendJson(res, 200, {
           ok: true,
@@ -558,9 +858,18 @@ function createUnoServer(options) {
       if (req.method === 'POST' && joinMatch) {
         const roomId = joinMatch[1];
         const body = await readJsonBody(req);
-        const auth = authenticateRequestUser(body, req.headers);
+        const auth = authenticateRequestUser(body, req.headers, roomId);
         if (!auth.ok) {
-          return sendJson(res, 401, { ok: false, code: auth.code, error: auth.error });
+          const errStatus = auth.code === 'LAUNCH_TOKEN_ROOM_MISMATCH' ? 403 : 401;
+          return sendJson(res, errStatus, { ok: false, code: auth.code, error: auth.error });
+        }
+
+        if (auth.boundRoomId && String(auth.boundRoomId) !== String(roomId)) {
+          return sendJson(res, 403, {
+            ok: false,
+            code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+            error: 'Launch token is bound to a different room.'
+          });
         }
 
         const joinRes = await roomManager.joinRoom(roomId, auth.user, body.mode || 'player');
@@ -689,7 +998,42 @@ function createUnoServer(options) {
         ws._user = auth.user;
 
         if (type === 'CREATE_ROOM') {
-          const created = await roomManager.createRoom(ws._user, { roomId: msg.roomId });
+          if (auth.boundRoomId && (!msg.roomId || String(msg.roomId) !== String(auth.boundRoomId))) {
+            ws.sendJSON({
+              type: 'ERROR',
+              code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+              error: 'Room-scoped launch token cannot create a different room.'
+            });
+            return;
+          }
+
+          if (msg.roomMode === 'solo_utya' || msg.practice === true) {
+            const soloRes = await roomManager.createSoloPracticeRoom(ws._user);
+            const room = soloRes.room;
+            unsubscribeSocket(ws);
+            ws._roomId = room.id;
+            if (!roomSubscriptions.has(room.id)) roomSubscriptions.set(room.id, new Set());
+            roomSubscriptions.get(room.id).add({ ws, user: ws._user });
+
+            const sessionToken = signSessionToken({
+              user: ws._user,
+              exp: Date.now() + 24 * 3600 * 1000
+            }, opts.sessionSecret);
+
+            ws.sendJSON({
+              type: 'ROOM_JOINED',
+              sessionToken,
+              role: 'player',
+              seat: 0,
+              room: roomManager.formatPublicRoomState(room, ws._user.id)
+            });
+            return;
+          }
+
+          const created = await roomManager.createRoom(ws._user, {
+            roomId: msg.roomId,
+            maxPlayers: msg.maxPlayers === 2 ? 2 : 4
+          });
           const room = created.room;
           unsubscribeSocket(ws);
           ws._roomId = room.id;
@@ -698,6 +1042,7 @@ function createUnoServer(options) {
 
           const sessionToken = signSessionToken({
             user: ws._user,
+            boundRoomId: auth.boundRoomId || null,
             exp: Date.now() + 24 * 3600 * 1000
           }, opts.sessionSecret);
 
@@ -711,25 +1056,107 @@ function createUnoServer(options) {
           return;
         }
 
-        let targetRoomId = msg.roomId;
+        // AUTH_JOIN: Resolve target room from msg.roomId, msg.startParam, or auth.startParam,
+        // and authoritatively verify it against auth.boundRoomId before joining!
+        let targetRoomId = (msg.roomId !== undefined && msg.roomId !== null && String(msg.roomId).trim() !== '')
+          ? String(msg.roomId).trim()
+          : null;
         let requestedMode = msg.mode === 'spectator' ? 'spectator' : 'player';
+        let isOpaqueInvite = false;
 
-        if (!targetRoomId && msg.startParam) {
-          const parsed = parseStartParam(msg.startParam);
-          if (!parsed.valid) {
-            ws.sendJSON({ type: 'ERROR', code: 'INVALID_START_PARAM', error: parsed.error || 'Invalid room start_param.' });
-            return;
-          }
-          targetRoomId = parsed.roomId;
-          requestedMode = parsed.mode;
-        }
-
-        if (!targetRoomId || !/^uno_[a-zA-Z0-9_-]{3,48}$/.test(targetRoomId)) {
-          ws.sendJSON({ type: 'ERROR', code: 'INVALID_ROOM_ID', error: 'Invalid or missing room ID.' });
+        // If msg.roomId was explicitly passed as an empty or malformed string, reject rather than falling back
+        if (msg.roomId !== undefined && msg.roomId !== null && (!targetRoomId || !/^uno_[a-zA-Z0-9_-]{3,48}$/.test(targetRoomId))) {
+          ws.sendJSON({
+            type: 'ERROR',
+            code: auth.boundRoomId ? 'LAUNCH_TOKEN_ROOM_MISMATCH' : 'INVALID_ROOM_ID',
+            error: 'Invalid room ID.'
+          });
           return;
         }
 
-        const joinRes = await roomManager.joinRoom(targetRoomId, ws._user, requestedMode);
+        const rawStartParam = (msg.startParam !== undefined && msg.startParam !== null && String(msg.startParam).trim() !== '')
+          ? String(msg.startParam).trim()
+          : (auth.startParam || '');
+
+        if (rawStartParam) {
+          const parsed = parseStartParam(rawStartParam, opts.sessionSecret);
+          if (!parsed.valid) {
+            ws.sendJSON({
+              type: 'ERROR',
+              code: parsed.code || 'INVALID_START_PARAM',
+              error: parsed.error || 'Invalid room start_param.'
+            });
+            return;
+          }
+          if (parsed.isPractice) {
+            if (auth.boundRoomId) {
+              ws.sendJSON({
+                type: 'ERROR',
+                code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+                error: 'Room-scoped launch token cannot launch practice mode.'
+              });
+              return;
+            }
+            const soloRes = await roomManager.createSoloPracticeRoom(ws._user);
+            const room = soloRes.room;
+            unsubscribeSocket(ws);
+            ws._roomId = room.id;
+            if (!roomSubscriptions.has(room.id)) roomSubscriptions.set(room.id, new Set());
+            roomSubscriptions.get(room.id).add({ ws, user: ws._user });
+
+            const sessionToken = signSessionToken({
+              user: ws._user,
+              exp: Date.now() + 24 * 3600 * 1000
+            }, opts.sessionSecret);
+
+            ws.sendJSON({
+              type: 'ROOM_JOINED',
+              sessionToken,
+              role: 'player',
+              seat: 0,
+              room: roomManager.formatPublicRoomState(room, ws._user.id)
+            });
+            return;
+          }
+
+          if (targetRoomId && parsed.roomId && String(targetRoomId) !== String(parsed.roomId)) {
+            ws.sendJSON({
+              type: 'ERROR',
+              code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+              error: 'Target roomId does not match the room resolved from startParam.'
+            });
+            return;
+          }
+
+          if (!targetRoomId) {
+            targetRoomId = parsed.roomId;
+          }
+          requestedMode = msg.mode === 'spectator' ? 'spectator' : parsed.mode;
+          isOpaqueInvite = Boolean(parsed.isOpaqueInvite);
+        }
+
+        if (!targetRoomId || !/^uno_[a-zA-Z0-9_-]{3,48}$/.test(targetRoomId)) {
+          ws.sendJSON({
+            type: 'ERROR',
+            code: auth.boundRoomId ? 'LAUNCH_TOKEN_ROOM_MISMATCH' : 'INVALID_ROOM_ID',
+            error: 'Invalid or missing room ID.'
+          });
+          return;
+        }
+
+        // Authoritative final room-binding check before joining
+        if (auth.boundRoomId && String(targetRoomId) !== String(auth.boundRoomId)) {
+          ws.sendJSON({
+            type: 'ERROR',
+            code: 'LAUNCH_TOKEN_ROOM_MISMATCH',
+            error: 'Launch token is bound to a different room.'
+          });
+          return;
+        }
+
+        const joinRes = await roomManager.joinRoom(targetRoomId, ws._user, requestedMode, {
+          createIfMissing: isOpaqueInvite
+        });
         if (!joinRes.ok) {
           const currentRoomRes = await roomManager.getRoom(targetRoomId);
           ws.sendJSON({
@@ -752,6 +1179,7 @@ function createUnoServer(options) {
 
         const sessionToken = signSessionToken({
           user: ws._user,
+          boundRoomId: auth.boundRoomId || null,
           exp: Date.now() + 24 * 3600 * 1000
         }, opts.sessionSecret);
 
@@ -776,6 +1204,21 @@ function createUnoServer(options) {
 
       if (!ws._user || !ws._roomId) {
         ws.sendJSON({ type: 'ERROR', code: 'UNAUTHORIZED', error: 'Must authenticate and join a room first.' });
+        return;
+      }
+
+      if (type === 'LEAVE_ROOM') {
+        const prevRoomId = ws._roomId;
+        unsubscribeSocket(ws);
+        ws._roomId = null;
+        const leaveRes = await roomManager.leaveRoom(prevRoomId, ws._user.id);
+        if (leaveRes.ok && leaveRes.room && leaveRes.room.status !== 'expired') {
+          broadcastRoom(leaveRes.room, {
+            type: 'PLAYER_LEFT',
+            userId: ws._user.id
+          });
+        }
+        ws.sendJSON({ type: 'ROOM_LEFT', roomId: prevRoomId });
         return;
       }
 
@@ -870,6 +1313,7 @@ function createUnoServer(options) {
     db,
     roomManager,
     botController,
+    authenticateRequestUser,
     async start(customPort) {
       await db.init();
       const listenPort = customPort !== undefined ? customPort : opts.port;
@@ -892,10 +1336,7 @@ function createUnoServer(options) {
       if (isStopped) return;
       isStopped = true;
       clearInterval(cleanupTimer);
-      for (const timer of roomManager.botTurnTimers.values()) {
-        clearTimeout(timer);
-      }
-      roomManager.botTurnTimers.clear();
+      roomManager.clearAllTimers();
       wss.close();
       await new Promise(resolve => {
         if (!httpServer.listening) return resolve();
@@ -907,6 +1348,13 @@ function createUnoServer(options) {
 }
 
 if (require.main === module) {
+  process.on('unhandledRejection', (reason) => {
+    console.error('[UNO Royale Server] Unhandled promise rejection:', reason && reason.message ? reason.message : reason);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('[UNO Royale Server] Uncaught exception:', err && err.message ? err.message : err);
+  });
+
   try {
     const srv = createUnoServer();
     srv.start().then((port) => {
