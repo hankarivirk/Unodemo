@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <meta name="theme-color" content="#101923">
+  <meta name="description" content="PlayLo — a quick multiplayer color-and-number card game. Invite friends, play turns, and challenge the bots.">
+  <title>PlayLo — Card Arena</title>
+  <link rel="preconnect" href="https://telegram.org">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="https://telegram.org/js/telegram-web-app.js?63"></script>
+  <script src="/config.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="PlayLo home">
+        <span class="brand-mark"><span></span><span></span><span></span><span></span></span>
+        <span class="brand-words"><strong>PLAYLO</strong><small>CARD ARENA</small></span>
+      </a>
+      <div id="connection-status" class="connection-pill"><i></i><span>Connecting…</span></div>
+    </header>
+
+    <main>
+      <section id="screen-home" class="screen home-screen">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="eyebrow-dot"></span> REAL-TIME MULTIPLAYER</div>
+          <h1>Match the color.<br><em>Own the turn.</em></h1>
+          <p class="hero-subtitle">Bring your crew to the table. Play a card, change the color, and be the first to clear your hand.</p>
+          <div class="feature-row"><span><b>♧</b> 2–6 players</span><span><b>↻</b> Live turns</span><span><b>✦</b> Friendly bots</span></div>
+        </div>
+
+        <div class="home-card panel">
+          <div class="panel-heading"><span class="panel-icon">✦</span><div><h2>Ready to play?</h2><p>Create a table or join a friend.</p></div></div>
+          <label class="field-label" for="player-name">YOUR DISPLAY NAME</label>
+          <input id="player-name" class="text-field" maxlength="22" autocomplete="nickname" placeholder="Enter a name" value="">
+          <button id="create-room" class="button button-primary button-wide"><span>＋</span> Create a room <b>→</b></button>
+          <div class="splitter"><span></span><small>OR JOIN A FRIEND</small><span></span></div>
+          <div class="join-row"><input id="join-code" class="text-field code-field" maxlength="8" autocapitalize="characters" autocomplete="off" placeholder="ROOM CODE"><button id="join-room" class="button button-secondary">Join <b>→</b></button></div>
+          <p class="helper-note"><span>⌁</span> You can invite a friend after creating a room.</p>
+        </div>
+
+        <div id="auth-hint" class="auth-hint" hidden>Open this Mini App from your own Telegram bot, or use development mode for browser testing.</div>
+      </section>
+
+      <section id="screen-room" class="screen room-screen" hidden>
+        <div class="room-heading panel">
+          <div class="room-heading-left"><button id="back-home" class="icon-button" aria-label="Leave room">←</button><div><div class="eyebrow">YOUR TABLE</div><h1 id="room-title">Room <em>------</em></h1><p id="room-subtitle">Waiting for players to join…</p></div></div>
+          <div class="room-heading-actions"><button id="copy-invite" class="button button-secondary"><span>↗</span> Invite friends</button></div>
+        </div>
+
+        <div id="lobby-panel" class="panel lobby-panel">
+          <div class="section-heading"><div><h2>Players <span id="player-count" class="count-chip">1/6</span></h2><p>Ready when the host starts the game.</p></div><div class="host-tag">HOST CONTROLS</div></div>
+          <div id="lobby-players" class="players-grid"></div>
+          <div class="lobby-actions"><button id="add-bot" class="button button-secondary"><span>✦</span> Add a bot</button><button id="start-game" class="button button-primary"><span>▶</span> Start game</button></div>
+          <p id="lobby-hint" class="lobby-hint">Invite someone or add a bot to fill another seat.</p>
+        </div>
+
+        <div id="game-panel" class="panel game-panel" hidden>
+          <div class="game-meta"><div class="turn-status"><span class="pulse-dot"></span><span id="turn-label">Waiting for the next turn</span></div><div class="meta-chip" id="deck-count">DECK · 0</div><div class="meta-chip" id="direction-chip">DIRECTION · →</div></div>
+          <div id="opponents" class="opponents-row"></div>
+          <div class="table-surface">
+            <div class="table-lines"></div>
+            <div class="table-center-copy"><span class="center-spark">✦</span><span>PLAYLO</span><small>PLAY YOUR HAND</small></div>
+            <div class="pile-wrap">
+              <button id="draw-pile" class="card card-back" aria-label="Draw a card"><span class="back-mark">✦</span><small>DRAW</small></button>
+              <div class="pile-arrow">↔</div>
+              <div id="discard-pile" class="discard-pile"><div class="empty-pile">PLAY<br>A CARD</div></div>
+            </div>
+            <div class="active-color-wrap"><span>ACTIVE COLOR</span><div id="active-color-dot" class="color-dot blue"></div><strong id="active-color-label">BLUE</strong></div>
+          </div>
+          <div id="wild-picker" class="wild-picker" hidden><div><b>Choose the next color</b><small>Your turn resumes after you choose.</small></div><div class="wild-color-buttons"><button data-color="red" class="color-choice red" aria-label="Choose red"></button><button data-color="blue" class="color-choice blue" aria-label="Choose blue"></button><button data-color="green" class="color-choice green" aria-label="Choose green"></button><button data-color="yellow" class="color-choice yellow" aria-label="Choose yellow"></button></div></div>
+          <div class="hand-heading"><div><h2>Your hand</h2><p id="hand-hint">Play a highlighted card or draw one.</p></div><div id="hand-count" class="count-chip">0 cards</div></div>
+          <div id="my-hand" class="my-hand" aria-label="Your cards"></div>
+          <div class="game-actions"><button id="draw-button" class="button button-secondary"><span>↓</span> Draw card</button><button id="pass-button" class="button button-primary" hidden>End turn <b>→</b></button></div>
+          <div class="reactions-row"><span>QUICK REACTIONS</span><div id="reaction-buttons" class="reaction-buttons"><button data-emoji="😎" aria-label="Cool">😎</button><button data-emoji="😂" aria-label="Laugh">😂</button><button data-emoji="😭" aria-label="Cry">😭</button><button data-emoji="😡" aria-label="Angry">😡</button><button data-emoji="🔥" aria-label="Fire">🔥</button><button data-emoji="👍" aria-label="Thumbs up">👍</button><button data-emoji="🥳" aria-label="Celebrate">🥳</button></div></div>
+          <div id="finished-panel" class="finished-panel" hidden><div class="finish-spark">✦</div><h2 id="winner-title">Round complete</h2><p id="winner-copy">Nice game.</p><button id="rematch-button" class="button button-primary">Play again <b>↻</b></button><p id="rematch-status" class="helper-note"></p></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer"><span>PLAYLO</span><span>PLAY FAIR · HAVE FUN</span></footer>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

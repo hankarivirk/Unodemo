@@ -1,0 +1,498 @@
+[
+  {
+    "path": "assets/ui/bg_pattern-CjiR0IfL.png",
+    "bytes": 9739
+  },
+  {
+    "path": "assets/ui/bg_pattern_hw-BuWC0U7g.png",
+    "bytes": 30022
+  },
+  {
+    "path": "assets/ui/winner_glow-A_NCp9cn.png",
+    "bytes": 5390
+  },
+  {
+    "path": "assets/ui/reactions-v1-YrC84Qq-.webp",
+    "bytes": 32200
+  },
+  {
+    "path": "assets/ui/decks/decks-HC_52A.png.json",
+    "bytes": 539
+  },
+  {
+    "path": "assets/ui/decks/decks-Rny4xA@2x.png.json",
+    "bytes": 542
+  },
+  {
+    "path": "assets/ui/colorblind/cards-yiEQyg@2x.png.json",
+    "bytes": 11740
+  },
+  {
+    "path": "assets/ui/colorblind/cards-6HptzA.png.json",
+    "bytes": 11686
+  },
+  {
+    "path": "assets/ui/matcho/cards-cxSAsg@2x.png.json",
+    "bytes": 11566
+  },
+  {
+    "path": "assets/ui/matcho/cards-29wzmg.png.json",
+    "bytes": 11513
+  },
+  {
+    "path": "assets/ui/ui/bg_pattern-6si7.png",
+    "bytes": 3184
+  },
+  {
+    "path": "assets/ui/ui/card_shadow-ZiLvNA@2x.png",
+    "bytes": 26292
+  },
+  {
+    "path": "assets/ui/ui/turn_highlight-YvG6IA.png",
+    "bytes": 20202
+  },
+  {
+    "path": "assets/ui/ui/direction_arrow_hw-WQm_tg.png",
+    "bytes": 3863
+  },
+  {
+    "path": "assets/ui/ui/winner_glow-9WQKew.png",
+    "bytes": 14259
+  },
+  {
+    "path": "assets/ui/ui/winner_glow-eNGCJQ@2x.png",
+    "bytes": 37541
+  },
+  {
+    "path": "assets/ui/ui/player_highlight-6TgerA@2x.png",
+    "bytes": 80007
+  },
+  {
+    "path": "assets/ui/ui/player_highlight_hw-dHLh5w.png",
+    "bytes": 20614
+  },
+  {
+    "path": "assets/ui/ui/bg_pattern-mNiFKQ@2x.png",
+    "bytes": 4344
+  },
+  {
+    "path": "assets/ui/ui/card_shadow_pile-yPF2eQ@2x.png",
+    "bytes": 4522
+  },
+  {
+    "path": "assets/ui/ui/card_shadow-EWLaKQ.png",
+    "bytes": 13635
+  },
+  {
+    "path": "assets/ui/ui/direction_arrow_hw-z__6Rg@2x.png",
+    "bytes": 6840
+  },
+  {
+    "path": "assets/ui/ui/direction_arrow-ohEFIQ@2x.png",
+    "bytes": 7199
+  },
+  {
+    "path": "assets/ui/ui/turn_highlight-kZiSfQ@2x.png",
+    "bytes": 79367
+  },
+  {
+    "path": "assets/ui/ui/skip_highlight-IGDjwA@2x.png",
+    "bytes": 78650
+  },
+  {
+    "path": "assets/ui/ui/card_shadow_pile-i9-dIA.png",
+    "bytes": 2448
+  },
+  {
+    "path": "assets/ui/ui/player_highlight-LTZQpw.png",
+    "bytes": 20329
+  },
+  {
+    "path": "assets/ui/ui/skip_highlight-UKd4hQ.png",
+    "bytes": 20043
+  },
+  {
+    "path": "assets/ui/ui/player_highlight_hw-jTGFXg@2x.png",
+    "bytes": 68770
+  },
+  {
+    "path": "assets/ui/ui/direction_arrow-u82ieg.png",
+    "bytes": 3900
+  },
+  {
+    "path": "assets/fonts/LexendDeca-Black.woff2",
+    "bytes": 28384
+  },
+  {
+    "path": "assets/fonts/Nunito.woff2",
+    "bytes": 100444
+  },
+  {
+    "path": "assets/cards/decks/decks-5YTH0A.png",
+    "bytes": 11752
+  },
+  {
+    "path": "assets/cards/decks/decks-z2kipg@2x.png",
+    "bytes": 14684
+  },
+  {
+    "path": "assets/cards/colorblind/cards-wgN0QA.png",
+    "bytes": 132527
+  },
+  {
+    "path": "assets/cards/colorblind/cards-EkdlBg@2x.png",
+    "bytes": 186407
+  },
+  {
+    "path": "assets/cards/matcho/cards-9UAmOw.png",
+    "bytes": 125284
+  },
+  {
+    "path": "assets/cards/matcho/cards-w8MlmQ@2x.png",
+    "bytes": 177833
+  },
+  {
+    "path": "assets/audio/card_deal_3-XpZgdA.mp3",
+    "bytes": 2349
+  },
+  {
+    "path": "assets/audio/ui_close-8m_xMg.mp3",
+    "bytes": 6669
+  },
+  {
+    "path": "assets/audio/card_deal_1-JkrG.mp3",
+    "bytes": 2349
+  },
+  {
+    "path": "assets/audio/card_play_3-RiZDnQ.mp3",
+    "bytes": 2637
+  },
+  {
+    "path": "assets/audio/ui_click_start-4F_31Q.ogg",
+    "bytes": 4221
+  },
+  {
+    "path": "assets/audio/card_play_0-iYckhw.mp3",
+    "bytes": 2637
+  },
+  {
+    "path": "assets/audio/card_deal_0-Ebf5wg.ogg",
+    "bytes": 4242
+  },
+  {
+    "path": "assets/audio/player_reaction-zD0dnw.mp3",
+    "bytes": 4941
+  },
+  {
+    "path": "assets/audio/card_play_1-nJ4MXQ.mp3",
+    "bytes": 2349
+  },
+  {
+    "path": "assets/audio/card_return-HaoK.ogg",
+    "bytes": 15380
+  },
+  {
+    "path": "assets/audio/card_draw_4-muL3.mp3",
+    "bytes": 3789
+  },
+  {
+    "path": "assets/audio/card_draw_1-t29r.mp3",
+    "bytes": 3789
+  },
+  {
+    "path": "assets/audio/card_shuffle_3-PiEIbg.mp3",
+    "bytes": 9311
+  },
+  {
+    "path": "assets/audio/card_play_1-0DWoqw.ogg",
+    "bytes": 4127
+  },
+  {
+    "path": "assets/audio/action_skip-cEQQJA.mp3",
+    "bytes": 5229
+  },
+  {
+    "path": "assets/audio/ui_click_start-yuLDSg.mp3",
+    "bytes": 2035
+  },
+  {
+    "path": "assets/audio/card_play_4-YwARhg.ogg",
+    "bytes": 4412
+  },
+  {
+    "path": "assets/audio/picker_hide-XVhM-Q.ogg",
+    "bytes": 7506
+  },
+  {
+    "path": "assets/audio/action_skip_other-i-ST9A.mp3",
+    "bytes": 5229
+  },
+  {
+    "path": "assets/audio/card_draw_3-Kxtuzg.ogg",
+    "bytes": 4504
+  },
+  {
+    "path": "assets/audio/player_join-nSqvsw.ogg",
+    "bytes": 5309
+  },
+  {
+    "path": "assets/audio/card_draw_5-Fq7YfQ.ogg",
+    "bytes": 4339
+  },
+  {
+    "path": "assets/audio/card_draw_0-H3HCHg.ogg",
+    "bytes": 4695
+  },
+  {
+    "path": "assets/audio/ui_close-uObbOA.ogg",
+    "bytes": 4730
+  },
+  {
+    "path": "assets/audio/picker_hover-sE_ecQ.mp3",
+    "bytes": 10774
+  },
+  {
+    "path": "assets/audio/card_shuffle_4-VK_i_Q.mp3",
+    "bytes": 11903
+  },
+  {
+    "path": "assets/audio/ui_rematch-1V2udg.ogg",
+    "bytes": 4750
+  },
+  {
+    "path": "assets/audio/ui_rematch-FQ1XIA.mp3",
+    "bytes": 10774
+  },
+  {
+    "path": "assets/audio/picker_select-9UUh_Q.ogg",
+    "bytes": 8724
+  },
+  {
+    "path": "assets/audio/action_reverse-efBElg.mp3",
+    "bytes": 4077
+  },
+  {
+    "path": "assets/audio/card_shuffle_1-4DhPWA.ogg",
+    "bytes": 5317
+  },
+  {
+    "path": "assets/audio/card_shuffle_1-sVDJ7g.mp3",
+    "bytes": 7295
+  },
+  {
+    "path": "assets/audio/action_color-dqiK5w.ogg",
+    "bytes": 4152
+  },
+  {
+    "path": "assets/audio/card_draw_0-0LSQRQ.mp3",
+    "bytes": 4077
+  },
+  {
+    "path": "assets/audio/action_color-KzBo.mp3",
+    "bytes": 8973
+  },
+  {
+    "path": "assets/audio/card_return-i9dqNQ.mp3",
+    "bytes": 78191
+  },
+  {
+    "path": "assets/audio/card_deal_2-H0AISA.mp3",
+    "bytes": 2349
+  },
+  {
+    "path": "assets/audio/card_draw_4-3j3dEg.ogg",
+    "bytes": 4729
+  },
+  {
+    "path": "assets/audio/player_join-qvrCyw.mp3",
+    "bytes": 10774
+  },
+  {
+    "path": "assets/audio/card_draw_5-V5aTDQ.mp3",
+    "bytes": 2925
+  },
+  {
+    "path": "assets/audio/card_play_5-LBfkwA.mp3",
+    "bytes": 2925
+  },
+  {
+    "path": "assets/audio/card_play_5-EZeAXw.ogg",
+    "bytes": 4315
+  },
+  {
+    "path": "assets/audio/ui_open-E1yS4Q.ogg",
+    "bytes": 4781
+  },
+  {
+    "path": "assets/audio/player_lost-IRBd-Q.ogg",
+    "bytes": 19208
+  },
+  {
+    "path": "assets/audio/card_shuffle_3-MZ9anQ.ogg",
+    "bytes": 6119
+  },
+  {
+    "path": "assets/audio/card_select-vYCw.ogg",
+    "bytes": 4087
+  },
+  {
+    "path": "assets/audio/action_reverse-kqelcA.ogg",
+    "bytes": 4684
+  },
+  {
+    "path": "assets/audio/card_play_6-Tv8HuA.mp3",
+    "bytes": 2637
+  },
+  {
+    "path": "assets/audio/card_play_2-e81thA.mp3",
+    "bytes": 2349
+  },
+  {
+    "path": "assets/audio/card_deal_3-dZzNeQ.ogg",
+    "bytes": 4128
+  },
+  {
+    "path": "assets/audio/card_draw_3-oTSLjQ.mp3",
+    "bytes": 3213
+  },
+  {
+    "path": "assets/audio/card_play_3-ky_uoA.ogg",
+    "bytes": 4172
+  },
+  {
+    "path": "assets/audio/card_draw_6-ly3C1Q.ogg",
+    "bytes": 4518
+  },
+  {
+    "path": "assets/audio/card_shuffle_0-1HQoVg.ogg",
+    "bytes": 5698
+  },
+  {
+    "path": "assets/audio/card_play_2-mzGwjA.ogg",
+    "bytes": 4180
+  },
+  {
+    "path": "assets/audio/ui_open-zvvJvQ.mp3",
+    "bytes": 6669
+  },
+  {
+    "path": "assets/audio/card_hover-a8UGEQ.mp3",
+    "bytes": 4927
+  },
+  {
+    "path": "assets/audio/card_select-YPFdVw.mp3",
+    "bytes": 2000
+  },
+  {
+    "path": "assets/audio/action_skip-LB_utg.ogg",
+    "bytes": 5002
+  },
+  {
+    "path": "assets/audio/card_shuffle_2-Pce3qQ.ogg",
+    "bytes": 5853
+  },
+  {
+    "path": "assets/audio/card_draw_1-zA4WDA.ogg",
+    "bytes": 4620
+  },
+  {
+    "path": "assets/audio/player_reaction-5AjeGw.ogg",
+    "bytes": 4385
+  },
+  {
+    "path": "assets/audio/card_draw_6-dLKC6A.mp3",
+    "bytes": 3789
+  },
+  {
+    "path": "assets/audio/ui_confetti-473Gzw.ogg",
+    "bytes": 7509
+  },
+  {
+    "path": "assets/audio/card_deal_1-iK9sGg.ogg",
+    "bytes": 4148
+  },
+  {
+    "path": "assets/audio/card_shuffle_0-rzJcgg.mp3",
+    "bytes": 8735
+  },
+  {
+    "path": "assets/audio/player_won-SVCulg.ogg",
+    "bytes": 18854
+  },
+  {
+    "path": "assets/audio/card_play_6-uP5ROw.ogg",
+    "bytes": 4235
+  },
+  {
+    "path": "assets/audio/card_deal_0-aUQT.mp3",
+    "bytes": 2637
+  },
+  {
+    "path": "assets/audio/picker_show-sBRNWA.mp3",
+    "bytes": 78178
+  },
+  {
+    "path": "assets/audio/card_hover-braxSA.ogg",
+    "bytes": 4551
+  },
+  {
+    "path": "assets/audio/ui_click_end-5Glzmw.mp3",
+    "bytes": 2323
+  },
+  {
+    "path": "assets/audio/ui_confetti-XaUphA.mp3",
+    "bytes": 15021
+  },
+  {
+    "path": "assets/audio/picker_hover-a9jnCA.ogg",
+    "bytes": 3844
+  },
+  {
+    "path": "assets/audio/picker_show-llSnYA.ogg",
+    "bytes": 15400
+  },
+  {
+    "path": "assets/audio/player_lost-gIMEOg.mp3",
+    "bytes": 58221
+  },
+  {
+    "path": "assets/audio/picker_select-VEXBcw.mp3",
+    "bytes": 18765
+  },
+  {
+    "path": "assets/audio/card_play_4-5OdZNQ.mp3",
+    "bytes": 3213
+  },
+  {
+    "path": "assets/audio/picker_hide-pWogXg.mp3",
+    "bytes": 13869
+  },
+  {
+    "path": "assets/audio/action_skip_other-xLyxTg.ogg",
+    "bytes": 4957
+  },
+  {
+    "path": "assets/audio/player_won-9J34kA.mp3",
+    "bytes": 54765
+  },
+  {
+    "path": "assets/audio/card_deal_2-f9Ee.ogg",
+    "bytes": 4192
+  },
+  {
+    "path": "assets/audio/card_shuffle_2-zYhKjA.mp3",
+    "bytes": 8447
+  },
+  {
+    "path": "assets/audio/card_play_0-kGOSnw.ogg",
+    "bytes": 4276
+  },
+  {
+    "path": "assets/audio/card_shuffle_4-5fmWXA.ogg",
+    "bytes": 6876
+  },
+  {
+    "path": "assets/audio/ui_click_end-UTEOaQ.ogg",
+    "bytes": 4269
+  }
+]

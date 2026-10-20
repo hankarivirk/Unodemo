@@ -1,0 +1,22 @@
+{
+  "name": "playlo-telegram-mini-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "An independently implemented multiplayer color-and-number card game for Telegram Mini Apps and browsers.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "bot": "node src/bot.js",
+    "test": "node --test test/*.test.js",
+    "check": "node --check src/game.js && node --check src/server.js && node --check src/bot.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "grammy": "^1.36.3",
+    "socket.io": "^4.8.1"
+  }
+}
